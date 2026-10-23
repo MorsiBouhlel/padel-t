@@ -1,0 +1,70 @@
+# Checkpoint — Tournois de padel
+
+Dernière mise à jour : 2026-10-22 (idées 3, 7, 11, 12, 14 déployées ; départage inchangé, voir `standings` dans `lib/logic.js`)
+
+## Où on en est
+
+Application web mobile-first de gestion de tournois de padel, **en production** sur https://pt.algoris.tn.
+Tournoi en cours : **Bajada Championship 4 Edition** (12 paires, 66 matchs, importé de Score7, 6 matchs joués au moment de l'import).
+Lien public : https://pt.algoris.tn/#/t/cd1b9683d0
+
+## Fonctionnalités en place
+
+- **Format** : championnat en poule unique (aller simple, 3 pts victoire / 0 défaite, 4 qualifiés), puis play-offs (demi-finales 1er–4e et 2e–3e, finale, match pour la 3e place). Aussi possible : plusieurs poules, aller/retour.
+- **Départage** : points, différence de jeux, jeux marqués, confrontation directe (égalité à deux), moins de matchs joués, puis ordre d'inscription (pas de vrai tirage au sort).
+- **Scores** : 3 sets max, forfait (6-0 6-0), double forfait (défaite pour les deux), correction/effacement.
+- **Calendrier** : génération (jours, horaires, terrains) ou dates par match.
+- **Report de match guidé** (idée 2) : limite = veille de la journée suivante, confirmation pour une exception, historique, filtre « Reportés », compteur de reports par paire.
+- **Page par paire** (idée 6) : `#/t/<slug>/team/<id>` avec stats, forme, prochains matchs, résultats.
+- **Pénalités de points** par paire (ex. changement de partenaire : 2 pts), saisie manuelle.
+- **Paiements** (idée 13) : onglet organisateurs seulement, 150 DT/joueur (réglable), paiements partiels, export CSV. Jamais exposé publiquement.
+- **Comptes organisateurs multiples** : propriétaire `admin` + autres comptes créés depuis « Mon compte ». Tous gèrent tous les tournois.
+- **Alertes de retard / forfait** (idée 1) : `lateState` dans `lib/logic.js` ; badge « En retard » (date dépassée) ou « Forfait à appliquer » (journée suivante commencée), filtre « En retard », bandeau + bouton organisateur `POST /api/tournaments/:id/apply-forfeits` (double forfait 6-0/6-0, jamais automatique). Fuseau Africa/Tunis. Aucun match concerné aujourd'hui (24 matchs sur 66 ont une date).
+- **Changement de partenaire** (idée 4) : bouton organisateur sur la page de la paire, `POST /api/teams/:id/partner-change`. Refusé hors championnat (avant démarrage : modifier les joueurs directement ; play-offs : 409). Pénalité par défaut 2 pts à partir de la journée 4 (journée en cours = plus avancée parmi matchs joués ou datés ≤ aujourd'hui), modifiable dans le formulaire. Historique public (table `partner_changes`).
+- **PWA** (idée 8) : `manifest.webmanifest`, icônes PNG (générées en Node, balle sur fond vert), `sw.js` (réseau d'abord, `/api/` jamais mis en cache). Installable depuis le navigateur du téléphone ; pas encore testé sur un vrai appareil.
+- **Sauvegarde auto** (idée 10) : `VACUUM INTO` au démarrage puis toutes les heures (1 fichier/jour, fuseau Tunis, 14 conservés) dans `/data/backups`. API `GET/POST /api/backups`, `GET /api/backups/:name` (propriétaire seulement) ; boutons dans « Mon compte ». Déployé.
+- **Export WhatsApp** (idée 11) : boutons dans Classement (texte + image PNG générée en canvas) et Matchs (prochains matchs + retards, en texte). Côté navigateur uniquement (`public/app.js`, section « Export WhatsApp »), aucune route serveur. Texte testé en Node ; **image canvas et partage natif jamais vus dans un vrai navigateur/téléphone**. Déployé.
+- **Agenda .ics** (idée 7) : `GET /api/t/:slug/calendar.ics[?team=<id>]` (public), `lib/ics.js`. Matchs datés avec 2 équipes connues ; horaire "18:00"/"18h30" → événement de 1h30 (Tunis = UTC+1 converti en UTC), horaire absent ou libre → journée entière ; score dans la description ; UID stable par match donc les reports mettent l'abonnement à jour. Liens « s'abonner » / « télécharger » dans Matchs et page de paire. Testé (2 tests + API) ; jamais essayé dans Google/Apple Agenda. Déployé.
+- **Historique des modifications** (idée 3) : table `audit_log`, helper `audit()` dans `server.js`. Journalise avec « avant → après » : scores/forfaits/effacements, planning (date, heure, terrain), reports, réglages du tournoi, ajout/modif/suppression de paire (pénalité, poule), changement de partenaire, tirage, lancement, calendrier généré, play-offs, forfaits appliqués, paiements, import. `GET /api/tournaments/:id/audit` (organisateurs), onglet « Historique » (organisateurs seulement). Ne couvre que ce qui est fait **après** le déploiement ; l'historique supprimé avec le tournoi. Connexions et comptes organisateurs non journalisés. Déployé.
+- **Statistiques** (idée 12) : onglet public « Stats » (`statsPanel` dans `public/app.js`, calcul côté navigateur, rien côté serveur) : chiffres clés, meilleure attaque/défense (jeux par match), sets gagnés, séries de victoires (en cours/record), remontées, plus large victoire, match le plus accroché/long. Forfaits exclus des jeux/sets, inclus dans les séries. Testé avec des données API ; pas vu dans un vrai navigateur. Déployé.
+- **Édition suivante / archives** (idée 14) : `POST /api/tournaments/:id/next-edition` (organisateurs) crée un tournoi en inscriptions avec les mêmes réglages et règlement, les paires cochées (sans pénalités, poules ni paiements) et `prev_id`. Dialogue « Édition suivante » (bouton dans l'en-tête dès que le tournoi a démarré) : nom incrémenté (4 → 5), la dernière de chaque poule décochée par défaut, avertissement si classement provisoire. Liens ← édition précédente / suivante → sous le titre ; l'accueil sépare « Archives » (tournois terminés). Testé par API ; dialogue et accueil jamais vus dans un navigateur. Déployé.
+- **Notifications push** (idée 9) : Web Push (VAPID, paquet `web-push`), sans compte. Clés VAPID générées au 1er démarrage dans `/data/secrets.json` (ne pas les perdre : sinon tous les abonnements deviennent invalides). Tables `push_subs` (par tournoi, `team_id` NULL = tout le tournoi) et `push_sent` (anti-doublon). Routes publiques : `GET /api/push/key`, `POST|DELETE /api/t/:slug/push`, `/push/status`, `/push/test`. Envoi via `notify()` dans `server.js` (résultat saisi, corrigé ou annulé, changement de planning d'un match non joué, report, forfaits appliqués, play-offs lancés) ; `runReminders()` toutes les 10 min (veille 18h, 2 h avant, en retard, forfait à appliquer, fuseau Tunis), textes et règles dans `lib/notify.js` (8 tests). Service worker : `push` et `notificationclick`. Le bouton 🔔 est mis en avant (« Activer les notifications ») tant que l'appareil n'est pas abonné au tournoi, puis affiche « Notifications ✓ » (`updateNotifButton` dans `public/app.js`). Cloche 🔔 aussi dans la barre du haut (`#bell`, point jaune tant que non abonné). Notification de bienvenue au premier abonnement d'un appareil à un tournoi (pas au changement de paire suivie). Testé par API et tests unitaires ; **jamais reçu sur un vrai appareil** (iPhone : exige l'appli installée sur l'écran d'accueil). **Pas encore déployé.**
+- **Notifications prédéfinies** : bouton « 📣 Notifier tout le monde » (organisateurs, en-tête du tournoi). Messages stockés en base (`broadcast_templates`, communs à tous les tournois, installés une seule fois depuis `DEFAULT_TEMPLATES` de `lib/notify.js` : flag `broadcast_seeded` dans `settings`) et configurables via « ⚙ Configurer » (titre + texte ≤ 300 caractères, ajout/suppression, « Rétablir les messages d'origine »). Variables `{journee}` (numéro modifiable à l'envoi) et `{frais}`. Routes : `GET /api/tournaments/:id/broadcasts`, `POST /api/tournaments/:id/broadcast`, `GET/PUT /api/broadcast-templates`, `POST /api/broadcast-templates/reset`. Reçus par **tous** les abonnés du tournoi, y compris ceux qui ne suivent qu'une paire ; même message limité à 1 par minute ; journalisé dans l'historique. Testé par API ; pas encore déployé.
+- **Tableau de bord « Suivi »** (organisateurs, onglet avant Paiements) : avancement (matchs joués, journée, prochain match, encaissé, appareils abonnés), matchs du jour, puis « À traiter » : forfaits à appliquer, matchs en retard (jours de retard, limite), matchs à planifier (journée en cours et suivante), paiements en attente, paires sans abonné dédié (`GET /api/tournaments/:id/followers`), 5 dernières modifications. Boutons vers l'onglet concerné (`data-goto`). Calcul côté navigateur (`dashPanel`). Testé avec les données réelles de l'API ; pas vu dans un vrai navigateur ; pas encore déployé.
+- **Photos des joueurs** : table `player_photos` (JPEG 256 px en BLOB, donc incluses dans les sauvegardes). Envoi réservé aux organisateurs (`PUT/DELETE /api/teams/:id/photo/:n`, dans « Modifier l'équipe », envoi immédiat), lecture publique `GET /api/photos/:teamId/:n?v=`. Réduction/recadrage carré faits dans le navigateur (canvas). Affichées : liste des équipes, classement, page de la paire (avatars à initiales pour les joueurs sans photo, seulement si au moins une photo existe dans le tournoi). Changement de partenaire : la photo du joueur remplacé est supprimée ; édition suivante : photos reprises. Testé par API ; **le redimensionnement canvas et l'affichage n'ont jamais été vus dans un vrai navigateur. Pas encore déployé.**
+- **Noms de paire** : « A & B » par défaut (facultatif, suit les joueurs tant qu'il n'est pas personnalisé). Pas encore déployé.
+- **Import** d'un championnat existant : `POST /api/import`, script `scripts/import-score7.js` (déjà exécuté, ne pas relancer).
+
+## Technique
+
+- Stack : Node 20, Express, SQLite (`better-sqlite3`), front en JavaScript sans build (`public/`). ~1300 lignes.
+- Fichiers : `server.js` (API, base), `lib/logic.js` (classement, tableau), `public/app.js` + `style.css`, `test/` (10 tests unitaires, `npm test`).
+- Déploiement : Docker (`docker compose up -d --build` dans ce dossier). Données dans le volume `padel-data` (`/data/padel.db`, `/data/secrets.json`).
+- HTTPS : Caddy du projet `nextrack` (`/home/nextrack/nextrack/Caddyfile`, bloc `pt.algoris.tn`, conteneur `nextrack-caddy-1`), réseau Docker partagé `edge`. Port 3020 limité à 127.0.0.1.
+  - Recharger Caddy : `docker exec nextrack-caddy-1 caddy reload --config /etc/caddy/Caddyfile`
+  - Sauvegarde du Caddyfile d'origine : dossier temporaire de session (à ne pas compter dessus).
+- Mot de passe du propriétaire : généré au 1er démarrage (`docker compose logs padel`) ; `ADMIN_PASSWORD=... docker compose up -d` le réinitialise.
+- Sauvegarde de la base : `docker compose cp padel:/data/padel.db ./backup-padel.db` (contient hachages de mots de passe et paiements : ne pas publier).
+
+## Idées faites / à faire
+
+Voir `IDEES.md` : toutes les idées sont faites (1 à 14).
+
+## Limites connues
+
+- Les forfaits pour retard ne sont jamais appliqués automatiquement : un organisateur doit cliquer (volontaire).
+- Pas de vrai tirage au sort pour les égalités parfaites.
+- Notifications push : abonnement par appareil, aucune notification aux organisateurs seuls.
+- Interface testée par API et par jsdom, jamais dans un vrai navigateur ni sur téléphone : à vérifier visuellement.
+- Pas de dépôt git (le dossier n'est pas versionné).
+- 60 matchs sans score à saisir par les organisateurs.
+
+## Processus restant dans l'environnement de session
+
+Un `node server.js` de test (pid 244117, utilisateur `debian`) a été lancé par le sandbox de la session ; inoffensif (données temporaires, aucun port utile), disparaît au redémarrage.
+
+## Prochaine étape suggérée
+
+**À redéployer (corrections après retours de test, 2026-10-22)** : badge de notification transparent (`public/badge-96.png`, `scripts/make-badge.js`, cache SW v2) ; boutons Annuler/Fermer des fenêtres jamais bloqués par la validation (`openDialog`) ; bouton « Changer de partenaire » enfin relié (page de la paire). Pas vérifiés dans un vrai navigateur. Ensuite : retester sur téléphone (abonnement, « Tester », badge, annulations, changement de partenaire).
+
+Déployer l'idée 9 (`docker compose up -d --build`, sauvegarde auto au démarrage), puis tester sur un téléphone : s'abonner, « Tester », saisir un score. Idées 1 à 8 et 10 à 14 déjà déployées. Vérifier visuellement dans un vrai navigateur/téléphone : PWA, export WhatsApp (image canvas), agenda .ics, onglet Stats, dialogue « Édition suivante » et section « Archives ».

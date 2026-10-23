@@ -1,0 +1,22 @@
+services:
+  padel:
+    build: .
+    restart: unless-stopped
+    ports:
+      # Accès direct local uniquement ; l'accès public passe par Caddy (HTTPS) sur pt.algoris.tn
+      - "127.0.0.1:${PORT:-3020}:3000"
+    environment:
+      # Si vide, un mot de passe est généré au 1er démarrage (voir `docker compose logs padel`)
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+    volumes:
+      - padel-data:/data
+    networks:
+      - default
+      - edge
+
+volumes:
+  padel-data:
+
+networks:
+  edge:
+    external: true
