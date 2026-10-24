@@ -7,6 +7,7 @@ const L = require('./lib/logic');
 const { buildIcs } = require('./lib/ics');
 const webpush = require('web-push');
 const N = require('./lib/notify');
+const { forecast } = require('./lib/forecast');
 
 const PORT = process.env.PORT || 3000;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -572,15 +573,40 @@ app.post('/api/t/:slug/push/test', wrap((req, res) => {
 
 app.get('/api/tournaments', wrap((req, res) => {
   const rows = db.prepare(`SELECT t.id, t.slug, t.name, t.date, t.location, t.phase,
-    (SELECT COUNT(*) FROM teams WHERE tournament_id = t.id) AS teams
+    (SELECT COUNT(*) FROM teams WHERE tournament_id = t.id) AS teams,
+    (SELECT COUNT(*) FROM matches WHERE tournament_id = t.id AND team1 IS NOT NULL AND team2 IS NOT NULL) AS matches,
+    (SELECT COUNT(*) FROM matches WHERE tournament_id = t.id AND team1 IS NOT NULL AND team2 IS NOT NULL AND winner IS NOT NULL) AS played
     FROM tournaments t ORDER BY COALESCE(t.date, t.created_at) DESC, t.id DESC`).all();
+  const nextMatch = db.prepare(`SELECT m.date, m.time, a.name AS t1, b.name AS t2 FROM matches m
+    JOIN teams a ON a.id = m.team1 JOIN teams b ON b.id = m.team2
+    WHERE m.tournament_id = ? AND m.winner IS NULL AND m.date >= ? ORDER BY m.date, m.time LIMIT 1`);
+  const today = todayTn();
   // « Terminé » se déduit de la finale jouée : on ne le calcule que pour les tournois en phase finale
-  res.json(rows.map(({ id, ...r }) => (r.phase === 'knockout' ? { ...r, phase: fullState(q.tournament.get(id)).tournament.phase } : r)));
+  res.json(rows.map(({ id, ...r }) => {
+    const phase = r.phase === 'knockout' ? fullState(q.tournament.get(id)).tournament.phase : r.phase;
+    return { ...r, phase, next: phase === 'groups' || phase === 'knockout' ? nextMatch.get(id, today) || null : null };
+  }));
 }));
 app.get('/api/t/:slug', wrap((req, res) => {
   const t = q.bySlug.get(req.params.slug);
   if (!t) throw fail(404, 'Tournoi introuvable');
   res.json(fullState(t));
+}));
+
+// Prévisions (organisateurs pour le moment) : probabilités par simulation, recalculées seulement quand les résultats changent.
+const forecastCache = new Map();
+app.get('/api/t/:slug/forecast', admin, wrap((req, res) => {
+  const t = q.bySlug.get(req.params.slug);
+  if (!t) throw fail(404, 'Tournoi introuvable');
+  const teams = q.teams.all(t.id), matches = getMatches(t.id);
+  const sig = crypto.createHash('md5').update(JSON.stringify([t.phase, t.qualifiers, t.groups_count, t.win_pts, t.loss_pts, t.third_place,
+    teams.map((x) => [x.id, x.grp, x.penalty]), matches.map((m) => [m.id, m.team1, m.team2, m.winner, m.sets, m.forfeit])])).digest('hex');
+  const hit = forecastCache.get(t.id);
+  if (hit && hit.sig === sig) return res.json(hit.data);
+  const data = forecast({ tournament: t, teams, matches });
+  forecastCache.set(t.id, { sig, data });
+  if (forecastCache.size > 50) forecastCache.delete(forecastCache.keys().next().value);
+  res.json(data);
 }));
 
 // Historique des modifications (organisateurs uniquement)
@@ -830,17 +856,7 @@ app.post('/api/tournaments/:id/knockout', admin, wrap((req, res) => {
   const matches = getMatches(t.id);
   if (matches.some((m) => m.stage === 'group' && !m.winner)) throw fail(400, 'Tous les matchs de poule doivent être terminés');
   const st = groupStandings(t, teams, matches);
-  // Têtes de série : rang dans la poule, puis points, diff. sets, diff. jeux
-  const pool = st.flatMap((g) => g.rows.filter((r) => r.rank <= t.qualifiers));
-  const perf = (a, b) => b.points - a.points ||
-    (b.setsFor - b.setsAgainst) - (a.setsFor - a.setsAgainst) ||
-    (b.gamesFor - b.gamesAgainst) - (a.gamesFor - a.gamesAgainst);
-  const teamGroup = new Map(teams.map((x) => [x.id, x.grp]));
-  const winnersOrder = pool.filter((r) => r.rank === 1).sort(perf).map((r) => teamGroup.get(r.id));
-  // Les rangs suivants gardent l'ordre des groupes des premiers : évite les chocs entre équipes d'une même poule au 1er tour.
-  pool.sort((a, b) => a.rank - b.rank ||
-    (a.rank === 1 ? perf(a, b) : winnersOrder.indexOf(teamGroup.get(a.id)) - winnersOrder.indexOf(teamGroup.get(b.id))));
-  const seeds = pool.map((r) => r.id);
+  const seeds = L.knockoutSeeds(st, new Map(teams.map((x) => [x.id, x.grp])), t.qualifiers);
   if (seeds.length < 2) throw fail(400, 'Au moins 2 qualifiés nécessaires');
   const { rounds } = L.buildBracket(seeds, !!t.third_place);
   const ins = db.prepare('INSERT INTO matches (tournament_id, stage, round, pos, team1, team2) VALUES (?, ?, ?, ?, ?, ?)');

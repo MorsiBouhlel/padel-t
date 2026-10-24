@@ -91,21 +91,38 @@ async function load() {
   cur.log = isAdmin() ? await api(`/api/tournaments/${cur.data.tournament.id}/audit`).catch(() => []) : null;
   cur.followers = isAdmin() ? await api(`/api/tournaments/${cur.data.tournament.id}/followers`).catch(() => null) : null;
   if (!cur.tab) cur.tab = { setup: isAdmin() ? 'teams' : 'info', groups: 'groups' }[cur.data.tournament.phase] || 'bracket';
+  if (isAdmin() && (cur.tab === 'chances' || cur.team)) await loadForecast();
   renderTournament();
 }
 
 // --- Accueil -------------------------------------------------------------------
 async function renderHome() {
   const list = await api('/api/tournaments');
-  const archived = list.filter((t) => t.phase === 'finished');
-  const card = (items) => items.map((t) => `
+  const meta = (t) => [t.date && new Date(t.date).toLocaleDateString('fr-FR'), t.location, `${t.teams} équipe${t.teams > 1 ? 's' : ''}`].filter(Boolean).map(esc).join(' · ');
+  const arrow = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>';
+  // Grande carte pour un tournoi en cours : avancement et prochain match.
+  const live = (t) => {
+    const d = t.next && new Date(`${t.next.date}T12:00:00`);
+    const pct = t.matches ? Math.round((t.played / t.matches) * 100) : 0;
+    return `<a class="card tcard" href="#/t/${esc(t.slug)}">
+      <div class="row between"><span class="badge live">EN COURS</span><span class="muted">${PHASES[t.phase]}</span></div>
+      <h2>${esc(t.name)}</h2><div class="muted">${meta(t)}</div>
+      ${t.matches ? `<div class="row between" style="margin-top:14px"><strong>${t.played} match${t.played > 1 ? 's' : ''} joué${t.played > 1 ? 's' : ''}</strong><span class="muted">sur ${t.matches}</span></div><div class="bar"><i style="width:${pct}%"></i></div>` : ''}
+      ${t.next ? `<div class="next"><div class="datechip"><b>${d.getDate()}</b><span>${esc(d.toLocaleDateString('fr-FR', { month: 'short' }))}</span></div>
+        <div class="grow"><div class="muted">Prochain match${t.next.time ? ` · ${esc(t.next.time)}` : ''}</div><strong>${esc(t.next.t1)} – ${esc(t.next.t2)}</strong></div></div>` : ''}
+      <span class="cta">Voir le tournoi ${arrow}</span></a>`;
+  };
+  const simple = (t) => `
       <a class="card" href="#/t/${esc(t.slug)}">
-        <div class="row between"><strong>${esc(t.name)}</strong><span class="badge ${t.phase === 'groups' || t.phase === 'knockout' ? 'live' : ''}">${PHASES[t.phase]}</span></div>
-        <div class="muted">${[t.date && new Date(t.date).toLocaleDateString('fr-FR'), t.location, `${t.teams} équipe${t.teams > 1 ? 's' : ''}`].filter(Boolean).map(esc).join(' · ')}</div>
-      </a>`).join('');
+        <div class="row between"><strong>${esc(t.name)}</strong><span class="badge">${PHASES[t.phase]}</span></div>
+        <div class="muted">${meta(t)}</div>
+      </a>`;
+  const running = list.filter((t) => t.phase === 'groups' || t.phase === 'knockout');
+  const others = list.filter((t) => t.phase === 'setup');
+  const archived = list.filter((t) => t.phase === 'finished');
   app.innerHTML = `
-    <div class="row between"><h1>Tournois</h1>${isAdmin() ? '<button id="new" class="primary">+ Nouveau</button>' : ''}</div>
-    ${list.length ? card(list.filter((t) => t.phase !== 'finished')) + (archived.length ? `<h2>Archives</h2>${card(archived)}` : '') : '<div class="empty">Aucun tournoi pour le moment.</div>'}`;
+    ${isAdmin() ? '<div class="row between"><h1>Tournois</h1><button id="new" class="primary">+ Nouveau</button></div>' : ''}
+    ${list.length ? running.map(live).join('') + others.map(simple).join('') + (archived.length ? `<h2>Archives</h2>${archived.map(simple).join('')}` : '') : '<div class="empty">Aucun tournoi pour le moment.</div>'}`;
   $('#new')?.addEventListener('click', () => tournamentDialog());
 }
 
@@ -168,23 +185,23 @@ function nextEditionDialog() {
 function renderTournament() {
   if (cur.team) return renderTeamPage();
   const { tournament: t, teams } = cur.data;
-  if ((cur.tab === 'pay' || cur.tab === 'log' || cur.tab === 'dash' || cur.tab === 'teams') && !isAdmin()) cur.tab = t.phase === 'setup' ? 'info' : 'groups';
-  const tabs = [...(isAdmin() ? [['teams', 'Équipes']] : []), ['groups', 'Classement'], ['matches', 'Matchs'], ['bracket', 'Play-offs'], ['stats', 'Stats'], ['info', 'Infos'], ...(isAdmin() ? [['dash', 'Suivi'], ['pay', 'Paiements'], ['log', 'Historique']] : [])];
+  if ((cur.tab === 'pay' || cur.tab === 'log' || cur.tab === 'dash' || cur.tab === 'manage' || cur.tab === 'chances' || cur.tab === 'teams') && !isAdmin()) cur.tab = t.phase === 'setup' ? 'info' : 'groups';
+  const adminTabs = [['teams', 'Équipes'], ['dash', 'Suivi'], ['pay', 'Paiements'], ['log', 'Historique'], ['manage', 'Gestion']];
   document.title = `${t.name} · Padel`;
   app.innerHTML = `
-    <a href="#/" class="muted">← Tous les tournois</a>
-    <div class="row between"><h1>${esc(t.name)}</h1><span class="badge ${t.phase === 'groups' || t.phase === 'knockout' ? 'live' : ''}">${PHASES[t.phase]}</span></div>
-    <div class="muted">${[t.date && new Date(t.date).toLocaleDateString('fr-FR', { dateStyle: 'full' }), t.location, `${teams.length} équipes`].filter(Boolean).map(esc).join(' · ')}</div>
-    <div class="row" style="margin-top:10px">
-      <button class="ghost small" id="share" style="color:inherit">Copier le lien</button>
-      <button class="ghost small" id="notif" style="color:inherit" data-off="🔔 Activer les notifications" data-on="🔔 Notifications ✓">🔔 Notifications</button>
-      ${isAdmin() ? '<button class="ghost small" id="settings" style="color:inherit">Réglages</button>' : ''}
-      ${isAdmin() ? '<button class="ghost small" id="broadcast" style="color:inherit">📣 Notifier tout le monde</button>' : ''}
-      ${isAdmin() && t.phase !== 'setup' && !t.next ? '<button class="ghost small" id="nextEd" style="color:inherit">Édition suivante</button>' : ''}
+    <div class="hero">
+      <div class="row between"><a href="#/" class="back">← Tous les tournois</a><span class="badge ${t.phase === 'groups' || t.phase === 'knockout' ? 'live' : ''}">${PHASES[t.phase]}</span></div>
+      <h1>${esc(t.name)}</h1>
+      <div class="muted">${[t.date && new Date(t.date).toLocaleDateString('fr-FR', { dateStyle: 'full' }), t.location, `${teams.length} équipes`].filter(Boolean).map(esc).join(' · ')}</div>
+      <div class="row" style="margin-top:10px">
+        <button class="ghost small" id="share" style="color:inherit">Copier le lien</button>
+        <button class="ghost small" id="notif" style="color:inherit" data-off="🔔 Activer les notifications" data-on="🔔 Notifications ✓">🔔 Notifications</button>
+      </div>
+      ${t.prev || t.next ? `<div class="muted" style="margin-top:8px">${[t.prev && `← <a href="#/t/${esc(t.prev.slug)}">${esc(t.prev.name)}</a>`, t.next && `<a href="#/t/${esc(t.next.slug)}">${esc(t.next.name)}</a> →`].filter(Boolean).join(' · ')}</div>` : ''}
     </div>
-    ${t.prev || t.next ? `<div class="muted" style="margin-top:6px">${[t.prev && `← <a href="#/t/${esc(t.prev.slug)}">${esc(t.prev.name)}</a>`, t.next && `<a href="#/t/${esc(t.next.slug)}">${esc(t.next.name)}</a> →`].filter(Boolean).join(' · ')}</div>` : ''}
-    <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button role="tab" data-tab="${k}" aria-selected="${cur.tab === k}">${l}</button>`).join('')}</div>
-    <div id="panel">${{ teams: teamsPanel, groups: groupsPanel, matches: matchesPanel, bracket: bracketPanel, stats: statsPanel, info: infoPanel, dash: dashPanel, pay: payPanel, log: logPanel }[cur.tab]()}</div>`;
+    ${isAdmin() ? `<div class="chips"><span class="lab">Organisation</span>${adminTabs.map(([k, l]) => `<button data-tab="${k}" aria-selected="${cur.tab === k}">${l}</button>`).join('')}</div>` : ''}
+    <div id="panel" style="margin-top:6px">${{ teams: teamsPanel, groups: groupsPanel, matches: matchesPanel, bracket: bracketPanel, stats: statsPanel, chances: chancesPanel, info: infoPanel, dash: dashPanel, pay: payPanel, log: logPanel, manage: managePanel }[cur.tab]()}</div>
+    ${navHtml(cur.tab)}`;
 
   $('#share').onclick = async () => {
     const url = `${location.origin}/#/t/${t.slug}`;
@@ -195,16 +212,19 @@ function renderTournament() {
   $('#settings')?.addEventListener('click', () => tournamentDialog(t));
   $('#broadcast')?.addEventListener('click', broadcastDialog);
   $('#nextEd')?.addEventListener('click', nextEditionDialog);
-  app.querySelectorAll('[data-tab]').forEach((b) => (b.onclick = () => { cur.tab = b.dataset.tab; renderTournament(); }));
+  app.querySelectorAll('[data-tab]').forEach((b) => (b.onclick = async () => {
+    cur.tab = b.dataset.tab;
+    renderTournament();
+    // Les prévisions se calculent à la demande : on les charge à l'ouverture de l'onglet.
+    if (cur.tab === 'chances' && isAdmin()) { await loadForecast(); if (cur.tab === 'chances') renderTournament(); }
+  }));
   bindPanel();
 }
 
 // Joueurs « A & B », affichés sous le nom seulement s'il diffère (nom de paire personnalisé) : sinon rien.
 const playersLine = (x) => { const l = [x.p1, x.p2].filter(Boolean).join(' & '); return l && l !== x.name ? l : ''; };
 // --- Photos des joueurs ----------------------------------------------------
-// Avatars affichés seulement si au moins un joueur du tournoi a une photo (sinon l'interface reste inchangée) ;
-// les joueurs sans photo ont alors leur initiale.
-const hasPhotos = () => cur.data.teams.some((x) => x.photo1 || x.photo2);
+// Avatars : photo du joueur, ou son initiale à défaut.
 function avatar(x, n, px) {
   const name = n === 1 ? x.p1 : x.p2;
   if (!name) return '';
@@ -215,7 +235,7 @@ function avatar(x, n, px) {
 }
 const avatars = (id, px = 28) => {
   const x = cur.data.teams.find((t) => t.id === id);
-  return x && hasPhotos() && (x.p1 || x.p2) ? `<span class="avs">${avatar(x, 1, px)}${avatar(x, 2, px)}</span>` : '';
+  return x && (x.p1 || x.p2) ? `<span class="avs">${avatar(x, 1, px)}${avatar(x, 2, px)}</span>` : '';
 };
 
 // Photo carrée 256 px en JPEG : léger à envoyer et à afficher, quelle que soit la photo d'origine.
@@ -234,6 +254,18 @@ async function uploadPhoto(teamId, n, file) {
   const res = await fetch(`/api/teams/${teamId}/photo/${n}`, { method: 'PUT', headers: { 'Content-Type': 'image/jpeg', Authorization: `Bearer ${token}` }, body });
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Envoi impossible');
 }
+
+// Navigation du bas : onglets publics, icônes en trait fin.
+const NAV = [
+  ['groups', 'Classement', 'M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0z'],
+  ['matches', 'Matchs', 'M5 5h14v15H5zM5 10h14M9 3v4M15 3v4'],
+  ['bracket', 'Play-offs', 'M4 5h5v4H4zM4 15h5v4H4zM9 7h4v10H9M13 12h7'],
+  ['chances', 'Chances', 'M19 5L5 19M7.5 7.5h.01M16.5 16.5h.01'],
+  ['stats', 'Stats', 'M5 20V10M12 20V4M19 20v-7'],
+  ['info', 'Infos', 'M12 8h.01M11 12h1v5h1M3 12a9 9 0 1 0 18 0 9 9 0 0 0-18 0'],
+];
+const navHtml = (active) => `<nav class="tabs" role="tablist" aria-label="Sections du tournoi">${NAV.filter(([k]) => k !== 'chances' || isAdmin()).map(([k, l, d]) =>
+  `<button role="tab" data-tab="${k}" aria-selected="${active === k}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${d}"/></svg>${l}</button>`).join('')}</nav>`;
 
 const teamName = (id) => (cur.data.teams.find((t) => t.id === id) || {}).name;
 const teamLink = (id) => `<a class="tlink" href="#/t/${esc(cur.slug)}/team/${id}">${esc(teamName(id))}</a>`;
@@ -277,7 +309,11 @@ function teamsPanel() {
 function groupsPanel() {
   const { standings, tournament: t } = cur.data;
   if (!standings.length) return '<div class="empty">Le classement sera affiché après le lancement du championnat.</div>';
-  return standings.map((g) => `
+  const podium = (rows) => {
+    const col = (r, cls) => `<div class="${cls}">${avatars(r.id, 40)}<div class="nm">${teamLink(r.id)}</div><div class="pts">${r.points} pts</div><div class="step">${r.rank}</div></div>`;
+    return rows.length >= 3 && rows[0].played > 0 ? `<div class="card"><div class="podium">${col(rows[1], 'p2')}${col(rows[0], 'p1')}${col(rows[2], 'p3')}</div></div>` : '';
+  };
+  return standings.map((g) => `${podium(g.rows)}
     <div class="card">
       ${t.groups_count > 1 ? `<h3>Poule ${groupLetter(g.group)}</h3>` : ''}
       <table><thead><tr><th>#</th><th class="name">Équipe</th><th title="Matchs joués">J</th><th title="Victoires">V</th><th title="Défaites">D</th><th title="Jeux marqués">Pour</th><th title="Différence de jeux">Diff</th><th>Pts</th></tr></thead>
@@ -442,31 +478,36 @@ function renderTeamPage() {
   const played = mine.filter((m) => m.winner).sort((a, b) => (b.stage === a.stage ? b.round - a.round : a.stage === 'ko' ? -1 : 1));
   const upcoming = mine.filter((m) => !m.winner && (m.team1 && m.team2)).sort((a, b) => (a.date || '9').localeCompare(b.date || '9') || a.round - b.round);
   const form = [...played].reverse().slice(-5).map((m) => (m.winner === team.id ? 'V' : 'D'));
-  const stat = (v, l) => `<div class="card" style="text-align:center;margin:0"><div style="font-size:1.4rem;font-weight:700">${v}</div><div class="muted">${l}</div></div>`;
   const section = (title, list) => list.length ? `<h2>${title}</h2>${list.map(matchCard).join('')}` : '';
   const ko = mine.filter((m) => m.stage === 'ko');
   app.innerHTML = `
-    <a href="#/t/${esc(cur.slug)}" class="muted">← ${esc(t.name)}</a>
-    ${team.photo1 || team.photo2 ? `<div class="row" style="gap:18px;margin:10px 0 2px">${[1, 2].map((n) => (n === 1 ? team.p1 : team.p2) ? `<div style="text-align:center">${avatar(team, n, 84)}<div class="muted" style="margin-top:4px">${esc(n === 1 ? team.p1 : team.p2)}</div></div>` : '').join('')}</div>` : ''}
-    <h1>${esc(team.name)}</h1>
-    ${playersLine(team) ? `<div class="muted">${esc(playersLine(team))}</div>` : ''}
-    <div class="row" style="margin-top:8px">
-      ${row ? `<span class="badge ${row.rank <= t.qualifiers ? 'live' : ''}">${row.rank}${row.rank === 1 ? 'er' : 'e'} du classement${row.rank <= t.qualifiers ? ' · zone de qualification' : ''}</span>` : ''}
-      ${team.penalty ? `<span class="badge" style="background:var(--danger);color:#fff">Pénalité −${team.penalty} pt${team.penalty > 1 ? 's' : ''}</span>` : ''}
-      ${team.reports ? `<span class="badge">${team.reports} report${team.reports > 1 ? 's' : ''}</span>` : ''}
-      <button class="ghost small" id="share" style="color:inherit">Copier le lien</button>
-      <button class="ghost small" id="notif" style="color:inherit" data-off="🔔 Suivre cette paire" data-on="🔔 Notifications ✓">🔔 Suivre cette paire</button>
+    <div class="hero tall"><a href="#/t/${esc(cur.slug)}" class="back">← ${esc(t.name)}</a></div>
+    <div class="card overlap pairhead">
+      <div class="faces">${avatar(team, 1, 92)}${avatar(team, 2, 92)}</div>
+      <h1>${esc(team.name)}</h1>
+      ${playersLine(team) ? `<div class="muted">${esc(playersLine(team))}</div>` : ''}
+      <div class="row" style="margin-top:10px;justify-content:center">
+        ${row ? `<span class="badge ${row.rank <= t.qualifiers ? 'live' : ''}">${row.rank}${row.rank === 1 ? 'er' : 'e'} du classement${row.rank <= t.qualifiers ? ' · zone de qualification' : ''}</span>` : ''}
+        ${team.penalty ? `<span class="badge" style="background:var(--danger);color:#fff">Pénalité −${team.penalty} pt${team.penalty > 1 ? 's' : ''}</span>` : ''}
+        ${team.reports ? `<span class="badge">${team.reports} report${team.reports > 1 ? 's' : ''}</span>` : ''}
+      </div>
+      <div class="row" style="margin-top:14px;justify-content:center">
+        <button class="ghost small" id="notif" style="color:inherit" data-off="🔔 Suivre cette paire" data-on="🔔 Notifications ✓">🔔 Suivre cette paire</button>
+        <button class="ghost small" id="share" style="color:inherit">Copier le lien</button>
+      </div>
+      <div style="margin-top:10px">${icsLinks(team.id)}</div>
     </div>
-    <div style="margin-top:8px">${icsLinks(team.id)}</div>
-    ${row ? `<div class="grid2" style="grid-template-columns:repeat(4,1fr);margin-top:14px;gap:8px">
-      ${stat(row.points, 'Points')}${stat(row.played, 'Joués')}${stat(`${row.won}-${row.lost}`, 'V-D')}${stat(signed(row.gamesFor - row.gamesAgainst), 'Diff. jeux')}</div>
-      <p class="muted" style="margin-top:10px">Sets ${row.setsFor}-${row.setsAgainst} · Jeux ${row.gamesFor}-${row.gamesAgainst}${form.length ? ` · Forme : ${form.map((f) => `<strong style="color:var(${f === 'V' ? '--ok' : '--danger'})">${f}</strong>`).join(' ')}` : ''}</p>` : ''}
+    ${row ? `<div class="stats4">${[[row.points, 'Points'], [row.played, 'Joués'], [`${row.won}-${row.lost}`, 'V-D'], [signed(row.gamesFor - row.gamesAgainst), 'Diff. jeux']].map(([v, l]) => `<div><b>${v}</b><span>${l}</span></div>`).join('')}</div>
+      <div class="card row between"><div><strong>Forme</strong><div class="muted">Sets ${row.setsFor}-${row.setsAgainst} · Jeux ${row.gamesFor}-${row.gamesAgainst}</div></div>
+        <div class="row" style="gap:6px">${form.map((f) => `<span class="dot ${f === 'V' ? 'v' : 'd'}" aria-label="${f === 'V' ? 'Victoire' : 'Défaite'}">${f}</span>`).join('')}</div></div>` : ''}
+    ${(() => { const f = isAdmin() && cur.fc?.teams?.find((x) => x.id === team.id); if (!f) return ''; const ko = t.phase === 'knockout' || t.phase === 'finished'; return `<h2>Ses chances</h2><div class="stats4" style="grid-template-columns:repeat(3,minmax(0,1fr))">${[...(ko ? [['final', 'Finale']] : [['qualify', 'Qualification']]), ['podium', 'Podium'], ['champion', 'Victoire']].map(([k, l]) => `<div><b>${pct(f[k])}</b><span>${l}</span></div>`).join('')}</div>`; })()}
     ${team.changes?.length ? `<h2>Changements de partenaire</h2>${team.changes.map((c) => `<div class="card muted">J${c.round || '—'} · ${esc([c.old_p1, c.old_p2].filter(Boolean).join(' & '))} → <strong>${esc([c.new_p1, c.new_p2].filter(Boolean).join(' & '))}</strong>${c.penalty ? ` · −${c.penalty} pts` : ' · sans pénalité'}${c.reason ? ` · ${esc(c.reason)}` : ''}</div>`).join('')}` : ''}
     ${isAdmin() && t.phase === 'groups' ? '<div class="row" style="margin-top:12px"><button class="small" id="partner">Changer de partenaire</button></div>' : ''}
     ${section('Phase finale', ko)}
     ${section('Prochains matchs', upcoming.filter((m) => m.stage === 'group'))}
     ${section('Résultats', played.filter((m) => m.stage === 'group'))}
-    ${!mine.length ? '<div class="empty">Aucun match pour le moment.</div>' : ''}`;
+    ${!mine.length ? '<div class="empty">Aucun match pour le moment.</div>' : ''}
+    ${navHtml('groups')}`;
   $('#share').onclick = async () => {
     const url = `${location.origin}/#/t/${cur.slug}/team/${team.id}`;
     try { await navigator.clipboard.writeText(url); toast('Lien copié'); } catch { prompt('Lien de la paire', url); }
@@ -474,6 +515,7 @@ function renderTeamPage() {
   $('#notif').onclick = () => pushDialog(team.id);
   updateNotifButton();
   $('#partner')?.addEventListener('click', () => partnerDialog(team));
+  app.querySelectorAll('[data-tab]').forEach((b) => (b.onclick = () => { cur.tab = b.dataset.tab; location.hash = `#/t/${cur.slug}`; }));
   bindPanel();
 }
 
@@ -604,6 +646,48 @@ function dashPanel() {
     ${sections.length ? `<h2>À traiter</h2>${sections.join('')}` : '<div class="card" style="text-align:center">✅ Rien à traiter pour le moment.</div>'}
     ${cur.log?.length ? `<h2>Dernières modifications</h2>${cur.log.slice(0, 5).map((e) => `<div class="card" style="margin:6px 0;padding:10px 12px"><div class="muted">${esc(e.username)}</div><div>${esc(e.detail)}</div></div>`).join('')}<button class="ghost small" data-goto="log" style="color:inherit">Tout l'historique</button>` : ''}`;
 }
+// Gestion du tournoi (organisateurs) : réglages, messages à tous, édition suivante.
+function managePanel() {
+  const { tournament: t } = cur.data;
+  const n = cur.followers?.devices;
+  const item = (title, text, action) => `<div class="card"><strong>${title}</strong><p class="muted" style="margin:4px 0 12px">${text}</p>${action}</div>`;
+  const next = t.next
+    ? `<a class="tlink" href="#/t/${esc(t.next.slug)}"><strong>Ouvrir « ${esc(t.next.name)} » →</strong></a>`
+    : t.phase === 'setup' ? '<span class="muted">Disponible une fois le tournoi lancé.</span>' : '<button id="nextEd">Créer l\'édition suivante</button>';
+  return `
+    ${item('⚙ Réglages du tournoi', 'Nom, date, lieu, poules, qualifiés, points, frais d\'inscription et règlement.', '<button id="settings">Modifier les réglages</button>')}
+    ${item('📣 Notifier tout le monde', `Envoyer un message prédéfini à tous les abonnés du tournoi${n === undefined ? '' : ` (${n} appareil${n > 1 ? 's' : ''} aujourd'hui)`}. Les messages se configurent dans la fenêtre d'envoi.`, '<button id="broadcast">Choisir un message</button>')}
+    ${item('➡ Édition suivante', 'Crée un nouveau tournoi avec les mêmes réglages et les paires que vous choisissez. Les photos sont reprises.', next)}`;
+}
+// Prévisions : chances de chaque paire, calculées côté serveur par simulation (lib/forecast.js).
+async function loadForecast() {
+  const slug = cur.slug;
+  try { const fc = await api(`/api/t/${slug}/forecast`); if (cur && cur.slug === slug) { cur.fc = fc; cur.fcErr = null; } }
+  catch (e) { if (cur && cur.slug === slug) cur.fcErr = e.message; }
+}
+const pct = (v) => (v <= 0 ? '0%' : v >= 1 ? '100%' : v < 0.005 ? '<1%' : v > 0.995 ? '>99%' : `${Math.round(v * 100)}%`);
+function chancesPanel() {
+  const fc = cur.fc, { tournament: t } = cur.data;
+  if (!fc) return cur.fcErr ? `<div class="empty">Prévisions indisponibles : ${esc(cur.fcErr)}</div>` : '<div class="empty">Chargement des prévisions…</div>';
+  if (fc.status === 'setup') return '<div class="empty">Les prévisions apparaîtront une fois le championnat lancé et les premiers résultats saisis.</div>';
+  const ko = t.phase === 'knockout' || t.phase === 'finished';
+  const metrics = [['champion', 'Victoire finale'], ['podium', 'Podium'], ['final', 'Finale'], ...(ko ? [] : [['qualify', 'Qualification'], ['first', '1er de poule']])];
+  const m = metrics.some(([k]) => k === cur.fcMetric) ? cur.fcMetric : 'champion';
+  const rows = [...fc.teams].sort((a, b) => b[m] - a[m] || b.champion - a.champion || a.avgRank - b.avgRank);
+  const low = !ko && fc.groupsTotal && fc.groupsPlayed / fc.groupsTotal < 0.25;
+  const others = (x) => metrics.filter(([k]) => k !== m).map(([k, l]) => `${l} ${pct(x[k])}`).join(' · ');
+  return `
+    ${t.phase === 'finished' ? '<div class="card" style="text-align:center">🏆 Tournoi terminé : résultats définitifs.</div>' : `<div class="card"><strong>Qui va gagner ?</strong>
+      <p class="muted" style="margin:4px 0 0">Estimation par simulation de ${fc.sims.toLocaleString('fr-FR')} tournois, à partir des sets déjà joués et des matchs restants. Les chances bougent après chaque résultat.</p></div>`}
+    ${low ? `<div class="card" style="background:var(--tint)"><strong>Estimation peu fiable</strong><div class="muted">Seulement ${fc.groupsPlayed} match${fc.groupsPlayed > 1 ? 's' : ''} joué${fc.groupsPlayed > 1 ? 's' : ''} sur ${fc.groupsTotal} : les chances évolueront beaucoup.</div></div>` : ''}
+    <div class="chips">${metrics.map(([k, l]) => `<button data-fcm="${k}" aria-selected="${m === k}">${l}</button>`).join('')}</div>
+    ${rows.map((x, i) => `<div class="card" style="margin:8px 0">
+      <div class="row between" style="flex-wrap:nowrap"><div class="row" style="flex-wrap:nowrap;min-width:0"><span class="muted" style="width:1.4em">${i + 1}</span>${avatars(x.id, 30)}<strong style="min-width:0">${teamLink(x.id)}</strong></div>
+        <span class="pct">${pct(x[m])}</span></div>
+      <div class="bar" role="img" aria-label="${pct(x[m])}"><i style="width:${Math.max(x[m] * 100, x[m] > 0 ? 2 : 0)}%"></i></div>
+      <div class="muted" style="font-size:.8rem">${others(x)}</div></div>`).join('')}
+    <p class="muted">Méthode : le niveau de chaque paire est estimé sur ses sets gagnés et perdus (les forfaits sont ignorés), prudemment tant qu'il y a peu de matchs. Les matchs restants sont tirés au sort selon ces niveaux, puis le classement et le tableau final suivent les vraies règles du tournoi. C'est une estimation, pas une certitude.</p>`;
+}
 function logPanel() {
   if (!cur.log) return '<div class="empty">Chargement…</div>';
   if (!cur.log.length) return '<div class="empty">Aucune modification enregistrée pour le moment.</div>';
@@ -647,6 +731,7 @@ function infoPanel() {
 function bindPanel() {
   const { tournament: t } = cur.data;
   const p = $('#panel') || app;
+  p.querySelectorAll('[data-fcm]').forEach((b) => (b.onclick = () => { cur.fcMetric = b.dataset.fcm; renderTournament(); }));
   p.querySelectorAll('[data-goto]').forEach((b) => (b.onclick = () => { const [tab, filter] = b.dataset.goto.split(':'); cur.tab = tab; if (filter) cur.filter = filter; renderTournament(); }));
   p.querySelectorAll('[data-fteam]').forEach((el) => (el.onchange = () => { cur.fTeam = el.value; renderTournament(); }));
   p.querySelectorAll('[data-fround]').forEach((el) => (el.onchange = () => { cur.fRound = el.value; renderTournament(); }));
@@ -1009,6 +1094,51 @@ async function accountDialog() {
     try { await api(`/api/users/${b.dataset.reset}/password`, 'PUT', { password: pw }); toast('Mot de passe réinitialisé'); } catch (e) { $('#derr').textContent = e.message; }
   }));
 }
+
+// --- Invitation à installer l'appli (PWA) ---------------------------------------
+// Android / Chrome : le navigateur propose l'installation (beforeinstallprompt). iPhone : pas d'événement, on explique le geste.
+// Rien si l'appli est déjà installée (ouverte en mode « application »), et le message se retire 14 jours quand on le ferme.
+let installEvt = null;
+const isStandalone = () => !!(window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true;
+const isIos = () => /iphone|ipad|ipod/i.test(navigator.userAgent || '') || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const installDismissed = () => { try { return Date.now() - Number(localStorage.getItem('installDismissed') || 0) < 14 * 864e5; } catch { return false; } };
+
+function installBanner() {
+  const bar = $('#install');
+  if (!bar) return;
+  if (isStandalone() || installDismissed() || (!installEvt && !isIos())) { bar.hidden = true; return; }
+  bar.innerHTML = `
+    <svg width="34" height="34" viewBox="0 0 28 28" aria-hidden="true" style="flex:none"><circle cx="14" cy="14" r="13" fill="#0b2a5b"/><path d="M4 6c5 3 5 13 0 16M24 6c-5 3-5 13 0 16" stroke="#d4f04a" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+    <div class="grow"><strong>Installez Padel sur votre téléphone</strong><div style="font-size:.85rem">Accès direct depuis l'écran d'accueil et notifications des matchs.</div></div>
+    <button id="installGo" class="small">${installEvt ? 'Installer' : 'Comment ?'}</button>
+    <button id="installNo" class="ghost small" aria-label="Plus tard" style="color:inherit;padding:0 10px">✕</button>`;
+  bar.hidden = false;
+  $('#installGo').onclick = async () => {
+    if (installEvt) {
+      installEvt.prompt();
+      const r = await installEvt.userChoice.catch(() => null);
+      installEvt = null;
+      if (r && r.outcome === 'accepted') toast('Installation en cours…');
+      installBanner();
+    } else installHelp();
+  };
+  $('#installNo').onclick = () => { try { localStorage.setItem('installDismissed', String(Date.now())); } catch {} bar.hidden = true; };
+}
+function installHelp() {
+  const safari = !/crios|fxios|edgios|opios/i.test(navigator.userAgent || '');
+  openDialog(`<h3>Installer Padel sur iPhone</h3>
+    ${safari ? '' : '<p class="err" style="min-height:0">Ouvrez d\'abord ce site dans Safari : les autres navigateurs ne permettent pas l\'installation.</p>'}
+    <ol style="padding-left:1.2em;line-height:1.7">
+      <li>Touchez le bouton <strong>Partager</strong> (le carré avec une flèche) dans la barre de Safari.</li>
+      <li>Choisissez <strong>« Sur l'écran d'accueil »</strong>.</li>
+      <li>Touchez <strong>Ajouter</strong>, puis ouvrez Padel depuis sa nouvelle icône.</li>
+    </ol>
+    <p class="muted">Les notifications ne fonctionnent sur iPhone qu'une fois l'appli installée.</p>
+    <div class="row" style="margin-top:12px;justify-content:flex-end"><button value="cancel" class="primary">Compris</button></div>`, async () => {});
+}
+window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installEvt = e; installBanner(); });
+window.addEventListener('appinstalled', () => { installEvt = null; installBanner(); toast('Padel est installé'); });
+installBanner();
 
 $('#auth').addEventListener('click', () => (isAdmin() ? accountDialog() : loginDialog()));
 
