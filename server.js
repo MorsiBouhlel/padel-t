@@ -8,6 +8,7 @@ const { buildIcs } = require('./lib/ics');
 const webpush = require('web-push');
 const N = require('./lib/notify');
 const { forecast } = require('./lib/forecast');
+const K = require('./public/keeper-engine');
 
 const PORT = process.env.PORT || 3000;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -169,6 +170,15 @@ CREATE TABLE IF NOT EXISTS push_subs (
 CREATE TABLE IF NOT EXISTS push_sent (key TEXT PRIMARY KEY, sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);`);
 
 db.exec(`
+CREATE TABLE IF NOT EXISTS live_scores (
+  match_id INTEGER PRIMARY KEY REFERENCES matches(id) ON DELETE CASCADE,
+  token TEXT NOT NULL UNIQUE,       -- lien secret du score keeper (jamais exposé dans l'état public)
+  points TEXT NOT NULL,             -- JSON : [1,2,1,...] paire qui marque chaque point ; le score est recalculé en rejouant
+  status TEXT NOT NULL DEFAULT 'live', -- 'live' | 'submitted' (résultat proposé, à valider par un organisateur)
+  updated_at INTEGER NOT NULL
+);`);
+
+db.exec(`
 CREATE TABLE IF NOT EXISTS player_photos (
   team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
   player INTEGER NOT NULL,          -- 1 ou 2
@@ -219,6 +229,13 @@ const q = {
 const parseMatch = (m) => ({ ...m, sets: m.sets ? JSON.parse(m.sets) : null });
 const getMatches = (tid) => q.matches.all(tid).map(parseMatch);
 
+// --- Score keeper (comptage en direct) -----------------------------------------
+const LIVE_STALE_MS = 6 * 3600 * 1000;   // au-delà, un comptage sans nouveau point n'est plus affiché en direct
+const liveView = (l) => {
+  const r = K.replay(JSON.parse(l.points));
+  return { status: l.status, sets: r.sets, games: r.games, pts: K.pointLabels(r), tb: r.tb, winner: r.winner, points: r.used, updated_at: l.updated_at };
+};
+
 // --- Calcul de l'état complet d'un tournoi ----------------------------------
 function groupStandings(t, teams, matches) {
   const out = [];
@@ -257,6 +274,12 @@ function fullState(t) {
     m.deadline = firstDate[`${m.grp}-${m.round + 1}`] || null;
     m.moves = moves[m.id] || [];
     m.late = t.phase === 'groups' ? L.lateState(m, today) : null;
+  }
+  const lives = db.prepare('SELECT l.match_id, l.points, l.status, l.updated_at FROM live_scores l JOIN matches m ON m.id = l.match_id WHERE m.tournament_id = ?').all(t.id);
+  for (const l of lives) {
+    const m = byId.get(l.match_id);
+    if (m.winner || (l.status === 'live' && Date.now() - l.updated_at > LIVE_STALE_MS)) continue;
+    m.live = liveView(l);
   }
   const changes = db.prepare('SELECT c.team_id, c.old_p1, c.old_p2, c.new_p1, c.new_p2, c.round, c.penalty, c.reason, c.created_at FROM partner_changes c JOIN teams x ON x.id = c.team_id WHERE x.tournament_id = ? ORDER BY c.id').all(t.id);
   const photos = db.prepare('SELECT f.team_id, f.player, f.v FROM player_photos f JOIN teams x ON x.id = f.team_id WHERE x.tournament_id = ?').all(t.id);
@@ -877,6 +900,72 @@ app.post('/api/tournaments/:id/knockout', admin, wrap((req, res) => {
   res.json({ ok: true });
 }));
 
+// Score keeper : un appareil compte les points en direct avec un lien secret propre au match.
+// Le résultat n'entre dans le classement qu'après validation par un organisateur (PUT /api/matches/:id habituel).
+const liveByToken = db.prepare('SELECT * FROM live_scores WHERE token = ?');
+const liveByMatch = db.prepare('SELECT * FROM live_scores WHERE match_id = ?');
+
+// Organisateurs seulement : crée le comptage d'un match, ou renvoie le lien existant (à partager aux joueurs).
+app.post('/api/matches/:id/live', admin, wrap((req, res) => {
+  const m = q.match.get(req.params.id);
+  if (!m) throw fail(404, 'Match introuvable');
+  const t = loadT(m.tournament_id);
+  if (!m.team1 || !m.team2) throw fail(400, 'Les deux équipes ne sont pas encore connues');
+  if (m.winner) throw fail(409, 'Ce match a déjà un résultat');
+  if (m.stage === 'group' && t.phase !== 'groups') throw fail(409, 'Les poules sont closes');
+  const old = liveByMatch.get(m.id);
+  if (old) return res.json({ token: old.token });
+  const token = crypto.randomBytes(16).toString('hex');
+  db.prepare('INSERT INTO live_scores (match_id, token, points, status, updated_at) VALUES (?, ?, \'[]\', \'live\', ?)').run(m.id, token, Date.now());
+  res.json({ token });
+}));
+
+app.get('/api/live/:token', wrap((req, res) => {
+  const l = liveByToken.get(req.params.token);
+  if (!l) throw fail(404, 'Ce score keeper n\'existe plus (résultat saisi, fermé ou remplacé).');
+  const m = q.match.get(l.match_id);
+  const t = loadT(m.tournament_id);
+  const team = (id) => db.prepare('SELECT id, name FROM teams WHERE id = ?').get(id);
+  res.json({
+    slug: t.slug, tournament: t.name,
+    match: { id: m.id, stage: m.stage, round: m.round, grp: m.grp, court: m.court, time: m.time, date: m.date, team1: team(m.team1), team2: team(m.team2) },
+    points: JSON.parse(l.points), status: l.status, updated_at: l.updated_at,
+  });
+}));
+
+app.put('/api/live/:token', wrap((req, res) => {
+  const l = liveByToken.get(req.params.token);
+  if (!l) throw fail(404, 'Ce score keeper n\'existe plus (résultat saisi, fermé ou remplacé).');
+  const m = q.match.get(l.match_id);
+  if (m.winner) throw fail(409, 'Un résultat a déjà été saisi pour ce match');
+  const pts = req.body.points;
+  if (!Array.isArray(pts) || pts.length > 600 || !pts.every((x) => x === 1 || x === 2)) throw fail(400, 'Points invalides');
+  const r = K.replay(pts);
+  const points = pts.slice(0, r.used);
+  let status = 'live';
+  if (req.body.submit) {
+    if (!r.winner) throw fail(400, 'Le match n\'est pas terminé');
+    status = 'submitted';
+  }
+  db.prepare('UPDATE live_scores SET points = ?, status = ?, updated_at = ? WHERE match_id = ?').run(JSON.stringify(points), status, Date.now(), m.id);
+  res.json({ ok: true, points, status, winner: r.winner });
+}));
+
+app.delete('/api/live/:token', wrap((req, res) => {
+  db.prepare('DELETE FROM live_scores WHERE token = ?').run(req.params.token);
+  res.json({ ok: true });
+}));
+
+// Organisateurs : fermer ou rejeter un comptage (libère le match).
+app.delete('/api/matches/:id/live', admin, wrap((req, res) => {
+  const m = q.match.get(req.params.id);
+  if (!m) throw fail(404, 'Match introuvable');
+  const l = liveByMatch.get(m.id);
+  db.prepare('DELETE FROM live_scores WHERE match_id = ?').run(m.id);
+  if (l) audit(req, m.tournament_id, `Score keeper fermé : ${teamLabel(m.team1)} vs ${teamLabel(m.team2)}${l.status === 'submitted' ? ' (résultat proposé rejeté)' : ''}`);
+  res.json({ ok: true });
+}));
+
 // Saisie d'un résultat / planning
 const FORFEIT_SETS = { team1: [[6, 0], [6, 0]], team2: [[0, 6], [0, 6]] };
 const isDate = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
@@ -908,6 +997,7 @@ app.put('/api/matches/:id', admin, wrap((req, res) => {
       winner = L.matchResult(sets).winner === 1 ? m.team1 : m.team2;
     }
     setMatch.run(m.team1, m.team2, sets ? JSON.stringify(sets) : null, winner, forfeit, m.id);
+    db.prepare('DELETE FROM live_scores WHERE match_id = ?').run(m.id);
     if (m.stage === 'ko') propagate({ ...m, winner });
     newResult = resultText(sets, forfeit, winner);
     if (sets || winner === -1) scored = { winner, sets, forfeit };
@@ -937,7 +1027,7 @@ app.post('/api/tournaments/:id/apply-forfeits', admin, wrap((req, res) => {
   const t = loadT(req.params.id);
   if (t.phase !== 'groups') throw fail(409, 'Les poules ne sont pas en cours');
   const due = fullState(t).matches.filter((m) => m.late === 'forfeit');
-  db.transaction(() => { for (const m of due) setMatch.run(m.team1, m.team2, null, -1, 'both', m.id); })();
+  db.transaction(() => { for (const m of due) { setMatch.run(m.team1, m.team2, null, -1, 'both', m.id); db.prepare('DELETE FROM live_scores WHERE match_id = ?').run(m.id); } })();
   audit(req, t.id, `Double forfait appliqué à ${due.length} match(s) en retard : ${due.map((m) => `${teamLabel(m.team1)} vs ${teamLabel(m.team2)}`).join(', ') || '—'}`);
   for (const m of due) notify(t.id, [m.team1, m.team2], `Double forfait appliqué : ${teamLabel(m.team1)} vs ${teamLabel(m.team2)} (non joué dans les délais, 6-0 / 6-0 pour les deux paires).`);
   res.json({ ok: true, count: due.length });

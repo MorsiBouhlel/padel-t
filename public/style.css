@@ -170,3 +170,67 @@ td.name .tlink { display: inline; }
 .installbar[hidden] { display: none; }
 .installbar .grow { min-width: 0; line-height: 1.25; }
 @media (min-width: 760px) { .installbar { margin-inline: auto; } }
+
+/* Bandeau « score keeper » sous un match */
+.livebar { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin: -6px 0 12px; padding: 8px 14px; border-radius: 0 0 var(--radius) var(--radius); background: var(--tint); font-size: .9rem; }
+.livebar.sub { background: color-mix(in srgb, var(--ok) 16%, var(--card)); }
+.livedot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: var(--danger); animation: bellpulse 1.4s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .livedot { animation: none; } }
+
+/* Score keeper : plein écran, gros boutons, téléphone sur un support */
+body.keeping .top, body.keeping .installbar { display: none; }
+body.keeping { overscroll-behavior: none; }
+body.keeping main { max-width: none; padding: 0; }
+.keeper { height: 100dvh; display: flex; flex-direction: column; gap: 8px; padding: 8px 10px; padding-top: calc(8px + env(safe-area-inset-top)); padding-bottom: calc(10px + env(safe-area-inset-bottom));
+  background: var(--brand); color: #fff; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; touch-action: manipulation; }
+.kbar { display: flex; align-items: center; gap: 8px; }
+.kmeta { flex: 1; min-width: 0; font-size: .9rem; line-height: 1.2; }
+.ksync { font-size: .75rem; opacity: .85; }
+.ksync.off { color: var(--accent); font-weight: 700; opacity: 1; }
+.kicon { display: inline-flex; align-items: center; justify-content: center; width: 52px; height: 52px; min-height: 0; padding: 0; border-radius: 50%; background: rgba(255, 255, 255, .18); color: #fff; font-size: 1.6rem; text-decoration: none; line-height: 1; }
+.kboard { background: rgba(0, 0, 0, .28); border-radius: 18px; padding: 6px 14px; }
+.krow { display: flex; align-items: center; gap: 12px; padding: 6px 0; font-variant-numeric: tabular-nums; }
+.krow + .krow { border-top: 1px solid rgba(255, 255, 255, .2); }
+.kn { flex: 1; min-width: 0; font-family: "Bricolage Grotesque", sans-serif; font-weight: 800; font-size: clamp(1.05rem, 4.5vw, 1.6rem); line-height: 1.1; overflow-wrap: anywhere; }
+.kball { display: block; font: 700 .72rem "DM Sans", sans-serif; text-transform: uppercase; letter-spacing: .06em; color: var(--accent); }
+.ks { min-width: 1.4em; text-align: center; font-size: clamp(1.1rem, 5vw, 1.7rem); opacity: .75; }
+.ks.w { opacity: 1; font-weight: 800; }
+.ks.cur { opacity: 1; font-weight: 800; background: rgba(255, 255, 255, .16); border-radius: 10px; padding: 0 6px; }
+.kp { min-width: 2.2ch; text-align: center; font-family: "Bricolage Grotesque", sans-serif; font-weight: 800; font-size: clamp(2.2rem, 11vw, 3.6rem); line-height: 1; color: var(--accent); }
+.krow.win .kn { color: var(--accent); }
+.kstate { min-height: 1.4em; text-align: center; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; font-size: .95rem; color: var(--accent); }
+.kpads { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; }
+.kpad { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; border-radius: 26px; padding: 12px; border: 4px solid rgba(255, 255, 255, .85);
+  background: #fff; color: var(--btn); transition: transform .08s; -webkit-tap-highlight-color: transparent; }
+.kpad.p2 { background: var(--accent); border-color: var(--accent); color: #0b2a5b; }
+.kpad:active { transform: scale(.97); filter: brightness(.92); }
+.kname { font-family: "Bricolage Grotesque", sans-serif; font-weight: 800; font-size: clamp(1.2rem, 6vw, 2rem); text-align: center; line-height: 1.1; overflow-wrap: anywhere; }
+.kplus { font-family: "Bricolage Grotesque", sans-serif; font-weight: 800; font-size: clamp(3rem, 16vw, 6rem); line-height: 1; }
+@media (orientation: landscape) {
+  .kpads { flex-direction: row; }
+  .kplus { font-size: clamp(2.4rem, 14vh, 5rem); }
+  .kp { font-size: clamp(1.8rem, 9vh, 3rem); }
+}
+.kdone { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; padding: 12px; }
+.kdone h2 { margin: 0; font-size: clamp(1.4rem, 6vw, 2rem); }
+.kdone .muted { color: rgba(255, 255, 255, .8); }
+.kdone .ghost { color: #fff; border-color: rgba(255, 255, 255, .5); }
+.kdone .btn { background: var(--accent); color: #0b2a5b; text-decoration: none; display: inline-flex; align-items: center; }
+.ktrophy { font-size: 3.4rem; line-height: 1; }
+.kfinal { font: 800 clamp(1.8rem, 9vw, 3rem) "Bricolage Grotesque", sans-serif; color: var(--accent); letter-spacing: .06em; }
+.kbig { min-height: 64px; padding: 14px 32px; font-size: 1.15rem; }
+
+/* Onglet Live */
+.tabs button { position: relative; }
+.navdot { position: absolute; top: 6px; right: calc(50% - 20px); width: 9px; height: 9px; border-radius: 50%; background: var(--danger); border: 2px solid var(--card); animation: bellpulse 1.4s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .navdot { animation: none; } }
+.livecard { padding: 12px 14px; }
+.lrow { display: flex; align-items: center; gap: 10px; padding: 8px 0; font-variant-numeric: tabular-nums; }
+.lrow + .lrow { border-top: 1px dashed var(--line); }
+.ln { flex: 1; min-width: 0; font-weight: 800; font-size: 1.05rem; overflow-wrap: anywhere; }
+.ln a { color: inherit; text-decoration: none; }
+.ls { min-width: 1.3em; text-align: center; font-size: 1.15rem; color: var(--muted); }
+.ls.w { color: var(--ink); font-weight: 800; }
+.ls.cur { color: var(--ink); font-weight: 800; background: var(--tint); border-radius: 8px; padding: 0 6px; }
+.lp { min-width: 2.2ch; text-align: center; font: 800 1.9rem/1 "Bricolage Grotesque", sans-serif; color: var(--brand); }
+@media (prefers-color-scheme: dark) { .lp { color: var(--accent); } }

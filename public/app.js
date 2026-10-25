@@ -67,9 +67,15 @@ async function act(fn, okMsg) {
 
 // --- Routage -----------------------------------------------------------------
 async function render() {
+  keeperStop();
   const m = location.hash.match(/^#\/t\/([\w-]+)(?:\/team\/(\d+))?/);
+  const k = location.hash.match(/^#\/live\/(\w+)/);
   try {
-    if (m) {
+    if (k) {
+      cur = null;
+      $('#bell').hidden = true;
+      await renderKeeper(k[1]);
+    } else if (m) {
       if (!cur || cur.slug !== m[1]) cur = { slug: m[1], tab: null, filter: 'all', data: null };
       cur.team = m[2] ? Number(m[2]) : null;
       await load();
@@ -80,6 +86,7 @@ async function render() {
       await renderHome();
     }
   } catch (e) {
+    keeperStop();
     app.innerHTML = `<div class="empty">${esc(e.message)}<p><a href="#/">Retour</a></p></div>`;
   }
 }
@@ -200,7 +207,7 @@ function renderTournament() {
       ${t.prev || t.next ? `<div class="muted" style="margin-top:8px">${[t.prev && `← <a href="#/t/${esc(t.prev.slug)}">${esc(t.prev.name)}</a>`, t.next && `<a href="#/t/${esc(t.next.slug)}">${esc(t.next.name)}</a> →`].filter(Boolean).join(' · ')}</div>` : ''}
     </div>
     ${isAdmin() ? `<div class="chips"><span class="lab">Organisation</span>${adminTabs.map(([k, l]) => `<button data-tab="${k}" aria-selected="${cur.tab === k}">${l}</button>`).join('')}</div>` : ''}
-    <div id="panel" style="margin-top:6px">${{ teams: teamsPanel, groups: groupsPanel, matches: matchesPanel, bracket: bracketPanel, stats: statsPanel, chances: chancesPanel, info: infoPanel, dash: dashPanel, pay: payPanel, log: logPanel, manage: managePanel }[cur.tab]()}</div>
+    <div id="panel" style="margin-top:6px">${{ teams: teamsPanel, groups: groupsPanel, matches: matchesPanel, bracket: bracketPanel, stats: statsPanel, chances: chancesPanel, live: livePanel, info: infoPanel, dash: dashPanel, pay: payPanel, log: logPanel, manage: managePanel }[cur.tab]()}</div>
     ${navHtml(cur.tab)}`;
 
   $('#share').onclick = async () => {
@@ -259,13 +266,19 @@ async function uploadPhoto(teamId, n, file) {
 const NAV = [
   ['groups', 'Classement', 'M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0z'],
   ['matches', 'Matchs', 'M5 5h14v15H5zM5 10h14M9 3v4M15 3v4'],
+  ['live', 'Live', 'M12 12h.01M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M5.5 5.5a9 9 0 0 0 0 13M18.5 5.5a9 9 0 0 1 0 13'],
   ['bracket', 'Play-offs', 'M4 5h5v4H4zM4 15h5v4H4zM9 7h4v10H9M13 12h7'],
   ['chances', 'Chances', 'M19 5L5 19M7.5 7.5h.01M16.5 16.5h.01'],
   ['stats', 'Stats', 'M5 20V10M12 20V4M19 20v-7'],
   ['info', 'Infos', 'M12 8h.01M11 12h1v5h1M3 12a9 9 0 1 0 18 0 9 9 0 0 0-18 0'],
 ];
-const navHtml = (active) => `<nav class="tabs" role="tablist" aria-label="Sections du tournoi">${NAV.filter(([k]) => k !== 'chances' || isAdmin()).map(([k, l, d]) =>
-  `<button role="tab" data-tab="${k}" aria-selected="${active === k}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${d}"/></svg>${l}</button>`).join('')}</nav>`;
+// Parties en cours de comptage (score keeper) : l'onglet Live n'apparaît que s'il y en a, pour ne pas surcharger la barre.
+const liveMatches = () => cur.data.matches.filter((m) => m.live && !m.winner && m.live.status === 'live' && m.live.points > 0);
+const navHtml = (active) => {
+  const n = liveMatches().length;
+  return `<nav class="tabs" role="tablist" aria-label="Sections du tournoi">${NAV.filter(([k]) => (k !== 'chances' || isAdmin()) && (k !== 'live' || n || active === 'live')).map(([k, l, d]) =>
+    `<button role="tab" data-tab="${k}" aria-selected="${active === k}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${d}"/></svg>${l}${k === 'live' && n ? '<i class="navdot"></i>' : ''}</button>`).join('')}</nav>`;
+};
 
 const teamName = (id) => (cur.data.teams.find((t) => t.id === id) || {}).name;
 const teamLink = (id) => `<a class="tlink" href="#/t/${esc(cur.slug)}/team/${id}">${esc(teamName(id))}</a>`;
@@ -344,8 +357,76 @@ function matchCard(m) {
   const meta = [label, m.date && fmtDate(m.date), m.time, m.court, moved, lateTag, forfeit && `<strong>${forfeit}</strong>`].filter(Boolean).map((x) => (x.includes('<strong>') ? x : x.startsWith('Reporté') ? x : esc(x))).join(' · ');
   const tag = editable ? 'button' : 'div';
   return `<${tag} class="match ${m.winner || bye ? '' : 'todo'} ${editable ? 'editable' : ''}" ${editable ? `data-match="${m.id}"` : ''}>
-    ${line(m.team1, 0)}${line(m.team2, 1)}<div class="meta">${meta}${editable && !m.winner ? ' · Saisir le score' : ''}</div></${tag}>`;
+    ${line(m.team1, 0)}${line(m.team2, 1)}<div class="meta">${meta}${editable && !m.winner ? ' · Saisir le score' : ''}</div></${tag}>${liveBar(m)}`;
 }
+
+// Score keeper : bandeau sous un match à jouer (lancer / en direct / résultat proposé à valider).
+const liveText = (l) => (l.winner ? l.sets.map((x) => x.join('-')).join(' ') : `${[...l.sets.map((x) => x.join('-')), l.games.join('-')].join(' ')} · ${l.pts.join('-')}`);
+const keeperToken = (id) => { try { return localStorage.getItem(`keeperMatch:${id}`); } catch { return null; } };
+function liveBar(m) {
+  if (m.winner || !m.team1 || !m.team2 || !(m.stage === 'ko' || cur.data.tournament.phase === 'groups')) return '';
+  const l = m.live, own = keeperToken(m.id), adm = isAdmin();
+  const close = adm ? `<button class="small ghost" data-liveclose="${m.id}">${l?.status === 'submitted' ? 'Rejeter' : '✕ Fermer'}</button>` : '';
+  if (l?.status === 'submitted') {
+    return `<div class="livebar sub"><span>✅ Résultat envoyé : <strong>${esc(l.sets.map((x) => x.join('-')).join(' '))}</strong>${adm ? '' : ' · en attente de validation'}</span>
+      ${adm ? `<button class="small primary" data-livevalid="${m.id}">Valider</button>` : ''}${close}</div>`;
+  }
+  // Seuls les organisateurs créent le lien ; les joueurs l'ouvrent depuis le lien reçu (et peuvent reprendre sur leur appareil).
+  const open = adm || own ? `<button class="small" data-keeper="${m.id}">▶ ${l?.points ? 'Reprendre' : 'Score keeper'}</button>` : '';
+  const link = adm ? `<button class="small ghost" data-keeperlink="${m.id}">🔗 Lien</button>` : '';
+  if (l?.points) return `<div class="livebar"><span><i class="livedot"></i> En direct · <strong>${esc(liveText(l))}</strong></span>${open}${link}${close}</div>`;
+  return adm ? `<div class="livebar">${open}${link}${l ? close : ''}</div>` : '';
+}
+
+async function openKeeper(matchId) {
+  let tk = null;
+  if (isAdmin()) tk = (await api(`/api/matches/${matchId}/live`, 'POST')).token;
+  else {
+    tk = keeperToken(matchId);
+    try { await api(`/api/live/${tk}`); } catch (e) { try { localStorage.removeItem(`keeperMatch:${matchId}`); } catch {} throw e; }
+  }
+  location.hash = `#/live/${tk}`;
+}
+
+// Copie ou partage : doit partir directement d'un tap (iPhone/Safari refusent après un appel réseau), d'où la fenêtre intermédiaire.
+async function copyOrShare(url, action, input) {
+  if (action === 'share') { try { await navigator.share({ title: 'Score keeper', url }); } catch {} return; }
+  try { await navigator.clipboard.writeText(url); }
+  catch {
+    input.focus(); input.select(); input.setSelectionRange(0, url.length);
+    if (!document.execCommand?.('copy')) throw new Error('Copie impossible : le lien est sélectionné, copiez-le à la main.');
+  }
+  toast('Lien copié');
+}
+
+async function shareKeeperLink(matchId) {
+  const { token: tk } = await api(`/api/matches/${matchId}/live`, 'POST');
+  const url = `${location.origin}/#/live/${tk}`;
+  openDialog(`<h3>Lien du score keeper</h3>
+    <p class="muted">Envoyez ce lien à la paire qui va compter les points. Il reste valable jusqu'à la saisie du résultat.</p>
+    <input id="kurl" readonly value="${esc(url)}" onfocus="this.select()">
+    <div class="row" style="margin-top:16px;justify-content:flex-end"><button value="cancel" class="ghost">Fermer</button>${navigator.share ? '<button value="share">Partager</button>' : ''}<button value="copy" class="primary">Copier</button></div>`,
+  (f, action) => copyOrShare(url, action, $('#kurl')));
+  load().catch(() => {});
+}
+
+app.addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-keeper],[data-keeperlink],[data-livevalid],[data-liveclose]');
+  if (!b) return;
+  try {
+    if (b.dataset.keeper) await openKeeper(b.dataset.keeper);
+    else if (b.dataset.keeperlink) await shareKeeperLink(b.dataset.keeperlink);
+    else if (b.dataset.livevalid) {
+      const m = cur.data.matches.find((x) => x.id == b.dataset.livevalid);
+      await api(`/api/matches/${m.id}`, 'PUT', { sets: m.live.sets });
+      await load(); toast('Résultat validé');
+    } else if (b.dataset.liveclose) {
+      if (!confirm('Fermer ce score keeper ? Les points comptés seront perdus.')) return;
+      await api(`/api/matches/${b.dataset.liveclose}/live`, 'DELETE');
+      await load(); toast('Score keeper fermé');
+    }
+  } catch (err) { toast(err.message); }
+});
 
 const icsLinks = (team) => {
   const path = `/api/t/${cur.slug}/calendar.ics${team ? `?team=${team}` : ''}`;
@@ -565,6 +646,20 @@ function computeStats() {
   return { teams: [...by.values()], records, done: order.length };
 }
 
+// Live : une carte par partie en cours, score recalculé par le serveur à partir des points du score keeper.
+function livePanel() {
+  const ms = liveMatches().sort((a, b) => b.live.updated_at - a.live.updated_at);
+  if (!ms.length) return '<div class="empty">Aucune partie en direct pour le moment.<p class="muted">Les parties comptées avec le score keeper apparaissent ici.</p></div>';
+  const { tournament: t } = cur.data;
+  const row = (m, i) => {
+    const l = m.live, id = i ? m.team2 : m.team1;
+    return `<div class="lrow"><span class="ln">${teamLink(id)}</span>${l.sets.map((x) => `<span class="ls ${x[i] > x[1 - i] ? 'w' : ''}">${x[i]}</span>`).join('')}<span class="ls cur">${l.games[i]}</span><span class="lp">${esc(l.pts[i])}</span></div>`;
+  };
+  const label = (m) => (m.stage === 'group' ? (t.groups_count > 1 ? `Poule ${groupLetter(m.grp)} · J${m.round}` : `Journée ${m.round}`) : m.pos === 1 && m.round === cur.data.koRounds ? cur.data.thirdName : cur.data.roundNames[m.round]);
+  return `<p class="muted" style="margin:4px 2px 10px">${ms.length} partie${ms.length > 1 ? 's' : ''} en direct · mise à jour automatique</p>`
+    + ms.map((m) => `<div class="card livecard"><div class="row between"><span class="muted"><i class="livedot"></i> En direct · ${esc([label(m), m.court].filter(Boolean).join(' · '))}</span>${m.live.tb ? '<span class="badge">Tie-break</span>' : ''}</div>${row(m, 0)}${row(m, 1)}</div>`).join('');
+}
+
 function statsPanel() {
   const d = cur.data;
   if (d.tournament.phase === 'setup') return '<div class="empty">Les statistiques apparaîtront dès les premiers matchs.</div>';
@@ -615,6 +710,7 @@ function dashPanel() {
   const round = group.reduce((r, m) => (m.winner || (m.date && m.date <= today) ? Math.max(r, m.round) : r), 0);
   const nextDate = ready.filter((m) => !m.winner && m.date && m.date >= today).map((m) => m.date).sort()[0];
 
+  const proposed = ready.filter((m) => !m.winner && m.live?.status === 'submitted');
   const ff = group.filter((m) => m.late === 'forfeit');
   const late = group.filter((m) => m.late === 'late');
   const noDate = t.phase === 'groups' ? group.filter((m) => !m.winner && !m.date && m.round <= round + 1) : [];
@@ -632,6 +728,7 @@ function dashPanel() {
   const sections = [
     ff.length && card('⚠ Forfaits à appliquer', ff, { tone: 'var(--danger)', goto: 'matches:late', gotoLabel: 'Voir et appliquer', lines: (m) => `${vs(m)} <span class="muted">· prévu ${fmtDate(m.date)}, journée suivante commencée</span>` }),
     late.length && card('⏰ Matchs en retard', late, { tone: '#d98e04', goto: 'matches:late', gotoLabel: 'Voir les matchs en retard', lines: (m) => `${vs(m)} <span class="muted">· depuis ${dayDiff(m.date)} j${m.deadline ? `, limite ${fmtDate(m.deadline)}` : ''}</span>` }),
+    proposed.length && card('📲 Scores à valider', proposed, { tone: 'var(--ok)', goto: 'matches:all', gotoLabel: 'Ouvrir les matchs', lines: (m) => `${vs(m)} <span class="muted">· ${esc(m.live.sets.map((x) => x.join('-')).join(' '))}</span> <button class="small primary" data-livevalid="${m.id}">Valider</button>` }),
     noDate.length && card('📅 Matchs à planifier (journée en cours et suivante)', noDate, { goto: 'matches:todo', gotoLabel: 'Voir les matchs à jouer', lines: (m) => `${vs(m)} <span class="muted">· J${m.round}</span>` }),
     owing.length && card('💰 Paiements en attente', owing, { goto: 'pay', gotoLabel: 'Ouvrir les paiements', lines: (x) => `<a class="tlink" href="#/t/${esc(cur.slug)}/team/${x.id}">${esc(x.name)}</a> <span class="muted">· reste ${dt(x.rest)}</span>` }),
     f && unfollowed.length && card('🔕 Paires sans abonné dédié', unfollowed, { lines: (x) => teamLink(x.id) }),
@@ -1033,6 +1130,185 @@ function scoreDialog(m) {
   });
 }
 
+// --- Score keeper (page plein écran, téléphone sur support) ------------------------------
+// Les points sont envoyés au serveur à chaque tap (liste 1/2) ; le score affiché est recalculé en les rejouant (KeeperEngine).
+let keeper = null;
+const keeperKey = (token) => `keeper:${token}`;
+
+function keeperStop() {
+  document.body.classList.remove('keeping');
+  if (!keeper) return;
+  clearInterval(keeper.poll); clearTimeout(keeper.timer);
+  document.removeEventListener('visibilitychange', keeper.onVis);
+  keeper.wake?.release?.().catch(() => {});
+  keeper = null;
+}
+
+async function renderKeeper(token) {
+  const info = await api(`/api/live/${token}`);
+  let local = null;
+  try { local = JSON.parse(localStorage.getItem(keeperKey(token))); } catch {}
+  try { localStorage.setItem(`keeperMatch:${info.match.id}`, token); } catch {}
+  keeper = { token, info, points: info.points, status: info.status, dirty: false, seq: 0, last: 0, sync: 'ok', closed: null };
+  // Des points comptés hors connexion et pas encore envoyés priment sur la version du serveur.
+  if (local?.dirty && Array.isArray(local.points)) { keeper.points = local.points; keeper.dirty = true; }
+  document.body.classList.add('keeping');
+  keeperDraw();
+  if (keeper.dirty) keeperSync();
+  keeper.poll = setInterval(keeperPoll, 4000);
+  const wake = async () => { try { if (keeper && document.visibilityState === 'visible') keeper.wake = await navigator.wakeLock?.request('screen'); } catch {} };
+  keeper.onVis = wake;
+  document.addEventListener('visibilitychange', wake);
+  wake();
+}
+
+const SYNC_LABEL = { ok: '● Enregistré', busy: '● Envoi…', off: '● Hors ligne : les points sont gardés' };
+
+function keeperDraw() {
+  const k = keeper;
+  if (!k) return;
+  const { match } = k.info;
+  const names = [match.team1.name, match.team2.name];
+  if (k.closed) {
+    app.innerHTML = `<div class="keeper"><div class="kdone"><h2>${esc(k.closed)}</h2><a class="btn primary" href="#/t/${esc(k.info.slug)}">Retour au tournoi</a></div></div>`;
+    return;
+  }
+  const r = KeeperEngine.replay(k.points);
+  const labels = KeeperEngine.pointLabels(r);
+  const press = KeeperEngine.pressure(k.points);
+  const label = match.stage === 'group' ? `Journée ${match.round}` : 'Phase finale';
+  const state = r.winner ? '' : r.tb ? 'Tie-break' : r.decisive ? 'Point décisif' : '';
+  const ball = (i) => (press[i] ? `<span class="kball">Balle de ${press[i]}</span>` : '');
+  const row = (i) => `<div class="krow ${r.winner === i + 1 ? 'win' : ''}">
+      <span class="kn">${esc(names[i])}${ball(i)}</span>
+      ${r.sets.map((x) => `<span class="ks ${x[i] > x[1 - i] ? 'w' : ''}">${x[i]}</span>`).join('')}
+      <span class="ks cur">${r.winner ? '' : r.games[i]}</span>
+      <span class="kp">${r.winner ? r.won[i] : labels[i]}</span></div>`;
+  const setsText = r.sets.map((x) => x.join('-')).join(' ');
+  let bottom;
+  if (r.winner) {
+    const sent = k.status === 'submitted';
+    bottom = `<div class="kdone"><div class="ktrophy">🏆</div><h2>${esc(names[r.winner - 1])} gagne</h2><div class="kfinal">${esc(setsText)}</div>
+      ${sent ? '<p>Résultat envoyé ✓<br><span class="muted">Un organisateur doit le valider avant qu\'il compte au classement.</span></p>'
+             : '<button class="primary kbig" id="ksubmit">Envoyer le résultat</button>'}
+      <button class="ghost" id="kundo2">↶ Corriger : annuler le dernier point</button></div>`;
+  } else {
+    bottom = `<div class="kpads">
+      ${[0, 1].map((i) => `<button class="kpad p${i + 1}" data-w="${i + 1}" aria-label="Point pour ${esc(names[i])}"><span class="kname">${esc(names[i])}</span><span class="kplus">+1</span></button>`).join('')}</div>`;
+  }
+  app.innerHTML = `<div class="keeper">
+    <div class="kbar">
+      <a class="kicon" href="#/t/${esc(k.info.slug)}" aria-label="Quitter le score keeper">←</a>
+      <div class="kmeta"><strong>${esc(label)}</strong>${match.court ? ` · ${esc(match.court)}` : ''}<div class="ksync ${k.sync}">${SYNC_LABEL[k.sync]}</div></div>
+      <button class="kicon" id="kundo" aria-label="Annuler le dernier point" ${k.points.length ? '' : 'disabled'}>↶</button>
+      <button class="kicon" id="kmenu" aria-label="Menu">⋯</button>
+    </div>
+    <div class="kboard">${row(0)}${row(1)}</div>
+    <div class="kstate">${state || '&nbsp;'}</div>
+    ${bottom}</div>`;
+  app.querySelectorAll('[data-w]').forEach((b) => (b.onclick = () => keeperPoint(Number(b.dataset.w))));
+  $('#kundo')?.addEventListener('click', keeperUndo);
+  $('#kundo2')?.addEventListener('click', keeperUndo);
+  $('#kmenu')?.addEventListener('click', keeperMenu);
+  $('#ksubmit')?.addEventListener('click', async () => {
+    try { await keeperSync(true); keeperDraw(); } catch (e) { toast(e.message); }
+  });
+}
+
+function keeperPoint(w) {
+  const k = keeper, now = Date.now();
+  if (!k || now - k.last < 300 || KeeperEngine.replay(k.points).winner) return; // double tap involontaire
+  k.last = now;
+  k.points.push(w);
+  navigator.vibrate?.(25);
+  keeperChanged();
+}
+
+function keeperUndo() {
+  if (!keeper?.points.length) return;
+  keeper.points.pop();
+  keeper.status = 'live';
+  keeperChanged();
+  toast('Point annulé');
+}
+
+function keeperChanged() {
+  const k = keeper;
+  k.dirty = true; k.seq++;
+  try { localStorage.setItem(keeperKey(k.token), JSON.stringify({ points: k.points, dirty: true })); } catch {}
+  keeperDraw();
+  clearTimeout(k.timer);
+  k.timer = setTimeout(() => keeperSync().catch(() => {}), 200);
+}
+
+// Envoie la liste des points au serveur ; en cas d'échec réseau, les points restent en local et on réessaie.
+async function keeperSync(submit = false) {
+  const k = keeper;
+  if (!k) return;
+  const seq = k.seq;
+  k.sync = 'busy'; keeperSyncLabel();
+  try {
+    const r = await api(`/api/live/${k.token}`, 'PUT', { points: k.points, ...(submit ? { submit: true } : {}) });
+    if (keeper !== k) return;
+    k.status = r.status;
+    if (k.seq === seq) { k.dirty = false; try { localStorage.removeItem(keeperKey(k.token)); } catch {} }
+    k.sync = 'ok'; keeperSyncLabel();
+  } catch (e) {
+    if (keeper !== k) return;
+    if (e.data?.error && /résultat|existe plus/.test(e.data.error)) { k.closed = e.message; keeperDraw(); return; }
+    k.sync = 'off'; keeperSyncLabel();
+    clearTimeout(k.timer);
+    k.timer = setTimeout(() => keeperSync().catch(() => {}), 5000);
+    if (submit) throw e;
+  }
+}
+
+function keeperSyncLabel() {
+  const el = $('.ksync');
+  if (!el || !keeper) return;
+  el.className = `ksync ${keeper.sync}`;
+  el.textContent = SYNC_LABEL[keeper.sync];
+}
+
+// Un autre téléphone peut compter le même match : on reprend sa version tant qu'on n'a rien d'en attente.
+async function keeperPoll() {
+  const k = keeper;
+  if (!k || k.dirty || k.closed || document.visibilityState !== 'visible') return;
+  try {
+    const info = await api(`/api/live/${k.token}`);
+    if (keeper !== k || k.dirty) return;
+    if (JSON.stringify(info.points) !== JSON.stringify(k.points) || info.status !== k.status) {
+      k.points = info.points; k.status = info.status; keeperDraw();
+    }
+  } catch (e) {
+    if (keeper === k && /existe plus/.test(e.message)) { k.closed = e.message; keeperDraw(); }
+  }
+}
+
+function keeperMenu() {
+  const k = keeper;
+  const url = `${location.origin}/#/live/${k.token}`;
+  openDialog(`<h3>Score keeper</h3>
+    <p class="muted">Pour compter depuis un autre téléphone, envoyez-lui ce lien (valable jusqu'à la saisie du résultat).</p>
+    <input id="kurl" readonly value="${esc(url)}" onfocus="this.select()">
+    <div class="row" style="margin-top:8px">${navigator.share ? '<button value="share">Partager</button>' : ''}<button value="copy" class="primary">Copier le lien</button></div>
+    <div class="row" style="margin-top:16px"><button value="reset" class="danger small">Recommencer à zéro</button><button value="close" class="danger small">Fermer le score keeper</button></div>
+    <div class="row" style="margin-top:16px;justify-content:flex-end"><button value="cancel" class="ghost">Retour</button></div>`,
+  async (f, action) => {
+    if (action === 'share' || action === 'copy') {
+      await copyOrShare(url, action, $('#kurl'));
+    } else if (action === 'reset') {
+      if (!confirm('Remettre le score à zéro ?')) throw new Error('Annulé');
+      k.points = []; k.status = 'live'; keeperChanged();
+    } else if (action === 'close') {
+      if (!confirm('Fermer le score keeper ? Les points comptés seront perdus.')) throw new Error('Annulé');
+      await api(`/api/live/${k.token}`, 'DELETE');
+      try { localStorage.removeItem(keeperKey(k.token)); localStorage.removeItem(`keeperMatch:${k.info.match.id}`); } catch {}
+      location.hash = `#/t/${k.info.slug}`;
+    }
+  });
+}
+
 // --- Authentification ----------------------------------------------------------------
 function loginDialog() {
   openDialog(`<h3>Accès organisateur</h3>
@@ -1144,5 +1420,6 @@ $('#auth').addEventListener('click', () => (isAdmin() ? accountDialog() : loginD
 
 window.addEventListener('hashchange', render);
 setInterval(() => { if (cur && !dlg.open && !document.hidden) load().catch(() => {}); }, 20000);
+setInterval(() => { if (cur && cur.tab === 'live' && !cur.team && !dlg.open && !document.hidden) load().catch(() => {}); }, 5000);
 setToken(token);
 render();
