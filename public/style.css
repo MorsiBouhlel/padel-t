@@ -234,3 +234,35 @@ body.keeping main { max-width: none; padding: 0; }
 .ls.cur { color: var(--ink); font-weight: 800; background: var(--tint); border-radius: 8px; padding: 0 6px; }
 .lp { min-width: 2.2ch; text-align: center; font: 800 1.9rem/1 "Bricolage Grotesque", sans-serif; color: var(--brand); }
 @media (prefers-color-scheme: dark) { .lp { color: var(--accent); } }
+
+/* Score keeper : pensé pour le paysage (téléphone couché sur son support) */
+.keeper { position: relative; }
+.krotate { display: none; }
+@media (orientation: portrait) {
+  .keeper:not(.stay) .krotate { display: flex; position: absolute; inset: 0; z-index: 3; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; text-align: center; background: var(--brand); }
+}
+.krotate h2 { margin: 0; font-size: 1.4rem; }
+.krotate p { margin: 0; opacity: .85; }
+.krotate .ghost { color: #fff; border-color: rgba(255, 255, 255, .5); margin-top: 8px; }
+.kphone { font-size: 4rem; line-height: 1; animation: kturn 2.4s ease-in-out infinite; }
+@keyframes kturn { 0%, 30% { transform: rotate(0); } 60%, 100% { transform: rotate(-90deg); } }
+@media (prefers-reduced-motion: reduce) { .kphone { animation: none; } }
+@media (orientation: landscape) {
+  .keeper { gap: 6px; padding: 6px 12px; padding-top: calc(6px + env(safe-area-inset-top)); padding-bottom: calc(8px + env(safe-area-inset-bottom));
+    padding-left: calc(12px + env(safe-area-inset-left)); padding-right: calc(12px + env(safe-area-inset-right)); }
+  .kicon { width: 44px; height: 44px; font-size: 1.4rem; }
+  .kmeta { font-size: .8rem; }
+  .kboard { padding: 2px 14px; border-radius: 14px; }
+  .krow { padding: 3px 0; gap: 10px; }
+  .kn { font-size: clamp(.95rem, 5vh, 1.4rem); }
+  .ks { font-size: clamp(1rem, 5.5vh, 1.5rem); }
+  .kp { font-size: clamp(1.7rem, 10vh, 2.8rem); }
+  .kstate { min-height: 1.1em; font-size: .75rem; line-height: 1.1; }
+  .kpad { border-radius: 22px; padding: 6px; }
+  .kname { font-size: clamp(1rem, 6vh, 1.7rem); }
+  .kplus { font-size: clamp(2.2rem, 17vh, 5.5rem); }
+  .kdone { flex-direction: row; flex-wrap: wrap; gap: 8px 20px; }
+  .ktrophy { font-size: 2.2rem; }
+  .kfinal { font-size: clamp(1.4rem, 8vh, 2.2rem); }
+  .kbig { min-height: 52px; }
+}

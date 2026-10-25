@@ -1141,6 +1141,7 @@ function keeperStop() {
   clearInterval(keeper.poll); clearTimeout(keeper.timer);
   document.removeEventListener('visibilitychange', keeper.onVis);
   keeper.wake?.release?.().catch(() => {});
+  try { screen.orientation?.unlock?.(); } catch {}
   keeper = null;
 }
 
@@ -1153,6 +1154,9 @@ async function renderKeeper(token) {
   // Des points comptés hors connexion et pas encore envoyés priment sur la version du serveur.
   if (local?.dirty && Array.isArray(local.points)) { keeper.points = local.points; keeper.dirty = true; }
   document.body.classList.add('keeping');
+  try { keeper.stay = localStorage.getItem('keeperPortrait') === '1'; } catch {}
+  // Verrouillage en paysage : accepté seulement par certains navigateurs (Android, appli installée) ; sinon l'invite « Tournez le téléphone » s'affiche en portrait.
+  try { screen.orientation?.lock?.('landscape').catch(() => {}); } catch {}
   keeperDraw();
   if (keeper.dirty) keeperSync();
   keeper.poll = setInterval(keeperPoll, 4000);
@@ -1196,7 +1200,7 @@ function keeperDraw() {
     bottom = `<div class="kpads">
       ${[0, 1].map((i) => `<button class="kpad p${i + 1}" data-w="${i + 1}" aria-label="Point pour ${esc(names[i])}"><span class="kname">${esc(names[i])}</span><span class="kplus">+1</span></button>`).join('')}</div>`;
   }
-  app.innerHTML = `<div class="keeper">
+  app.innerHTML = `<div class="keeper ${k.stay ? 'stay' : ''}">
     <div class="kbar">
       <a class="kicon" href="#/t/${esc(k.info.slug)}" aria-label="Quitter le score keeper">←</a>
       <div class="kmeta"><strong>${esc(label)}</strong>${match.court ? ` · ${esc(match.court)}` : ''}<div class="ksync ${k.sync}">${SYNC_LABEL[k.sync]}</div></div>
@@ -1205,7 +1209,9 @@ function keeperDraw() {
     </div>
     <div class="kboard">${row(0)}${row(1)}</div>
     <div class="kstate">${state || '&nbsp;'}</div>
-    ${bottom}</div>`;
+    ${bottom}
+    <div class="krotate"><div class="kphone" aria-hidden="true">📱</div><h2>Tournez le téléphone en mode paysage</h2><p>Le score keeper se lit et se touche mieux à l'horizontale.</p><button class="ghost" id="kstay">Rester en portrait</button></div></div>`;
+  $('#kstay')?.addEventListener('click', () => { k.stay = true; try { localStorage.setItem('keeperPortrait', '1'); } catch {} keeperDraw(); });
   app.querySelectorAll('[data-w]').forEach((b) => (b.onclick = () => keeperPoint(Number(b.dataset.w))));
   $('#kundo')?.addEventListener('click', keeperUndo);
   $('#kundo2')?.addEventListener('click', keeperUndo);
