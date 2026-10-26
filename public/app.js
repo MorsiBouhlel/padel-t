@@ -455,6 +455,15 @@ const icsLinks = (team) => {
   return `<span class="muted">Agenda : <a href="webcal://${location.host}${path}">s'abonner</a> · <a href="${path}" download>télécharger .ics</a></span>`;
 };
 
+// Journées repliables : choix mémorisé dans cur.secOpen ; par défaut seule la première journée
+// avec un match à jouer est ouverte (tout est ouvert si un filtre de journée est actif).
+function isSectOpen(key, s, ordered) {
+  if (cur.secOpen?.[key] !== undefined) return cur.secOpen[key];
+  if (cur.fRound) return true;
+  const first = ordered.find(([, x]) => x.items.some((m) => !m.winner)) || ordered[ordered.length - 1];
+  return first?.[0] === key;
+}
+
 function matchesPanel() {
   const entry = isAdmin() ? '' : codeEntry();
   const ms = cur.data.matches.filter((m) => !(m.stage === 'ko' && m.round === 1 && m.winner && (!m.team1 || !m.team2)));
@@ -484,7 +493,7 @@ function matchesPanel() {
   const alert = nLate ? `<div class="card"><strong>⚠ ${nLate} match${nLate > 1 ? 's' : ''} en retard</strong>${nFf ? `<div class="muted">${nFf} dont la journée suivante a commencé : défaite 6-0 / 6-0 pour les deux paires.</div>${isAdmin() ? `<button class="danger small" id="applyFf" style="margin-top:8px">Appliquer ${nFf} forfait${nFf > 1 ? 's' : ''}</button>` : ''}` : ''}</div>` : '';
   return `${entry}${alert}${isAdmin() ? `<div class="row" style="margin-top:12px"><button class="primary small" data-share="next">Partager les prochains matchs</button><button class="ghost small" data-share="next-copy" style="color:inherit">Copier</button></div><div style="margin-top:8px">${icsLinks()}</div>` : ''}<div class="row" style="margin-top:8px">${[['all', 'Tous'], ['todo', 'À jouer'], ['done', 'Terminés'], ['moved', 'Reportés'], ...(nLate ? [['late', `En retard (${nLate})`]] : [])].map(([k, l]) =>
     `<button class="${f === k ? 'primary' : 'ghost'} small" data-filter="${k}" style="${f === k ? '' : 'color:inherit'}">${l}</button>`).join('')}</div>${selects}
-    ${ordered.map(([, s]) => `<h2>${esc(s.title)}</h2>${s.items.map(matchCard).join('')}`).join('') || '<div class="empty">Aucun match dans cette catégorie.</div>'}`;
+    ${ordered.map(([k, s]) => `<details class="sect" data-sect="${k}" ${isSectOpen(k, s, ordered) ? 'open' : ''}><summary><h2>${esc(s.title)}</h2><span class="muted">${s.items.filter((m) => m.winner).length}/${s.items.length}</span></summary>${s.items.map(matchCard).join('')}</details>`).join('') || '<div class="empty">Aucun match dans cette catégorie.</div>'}`;
 }
 
 // Export WhatsApp : texte (wa.me) et image du classement (partage natif, sinon téléchargement)
@@ -853,6 +862,7 @@ function bindPanel() {
   const p = $('#panel') || app;
   p.querySelectorAll('[data-fcm]').forEach((b) => (b.onclick = () => { cur.fcMetric = b.dataset.fcm; renderTournament(); }));
   p.querySelectorAll('[data-goto]').forEach((b) => (b.onclick = () => { const [tab, filter] = b.dataset.goto.split(':'); cur.tab = tab; if (filter) cur.filter = filter; renderTournament(); }));
+  p.querySelectorAll('details[data-sect]').forEach((d) => (d.ontoggle = () => { (cur.secOpen ||= {})[d.dataset.sect] = d.open; }));
   p.querySelectorAll('[data-fteam]').forEach((el) => (el.onchange = () => { cur.fTeam = el.value; renderTournament(); }));
   p.querySelectorAll('[data-fround]').forEach((el) => (el.onchange = () => { cur.fRound = el.value; renderTournament(); }));
   p.querySelectorAll('[data-filter]').forEach((b) => (b.onclick = () => { cur.filter = b.dataset.filter; renderTournament(); }));

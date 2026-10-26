@@ -31,6 +31,11 @@ main { max-width: 760px; margin: 0 auto; padding: 16px; padding-bottom: calc(110
 h1 { font-size: 1.6rem; margin: 4px 0 2px; letter-spacing: -.5px; }
 h2 { font-size: 1.2rem; margin: 24px 0 10px; font-weight: 800; }
 h3 { font-size: 1.05rem; margin: 0 0 8px; }
+details.sect > summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; cursor: pointer; list-style: none; min-height: 44px; }
+details.sect > summary::-webkit-details-marker { display: none; }
+details.sect > summary h2 { margin: 14px 0 6px; }
+details.sect > summary h2::before { content: "▸"; display: inline-block; width: 1.1em; transition: transform .15s; }
+details.sect[open] > summary h2::before { transform: rotate(90deg); }
 .muted { color: var(--muted); font-size: .9rem; }
 
 /* En-tête de page : terrain vu de dessus */
