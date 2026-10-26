@@ -129,6 +129,7 @@ async function renderHome() {
   const archived = list.filter((t) => t.phase === 'finished');
   app.innerHTML = `
     ${isAdmin() ? '<div class="row between"><h1>Tournois</h1><button id="new" class="primary">+ Nouveau</button></div>' : ''}
+    ${isAdmin() ? '' : codeEntry()}
     ${list.length ? running.map(live).join('') + others.map(simple).join('') + (archived.length ? `<h2>Archives</h2>${archived.map(simple).join('')}` : '') : '<div class="empty">Aucun tournoi pour le moment.</div>'}`;
   $('#new')?.addEventListener('click', () => tournamentDialog());
 }
@@ -389,26 +390,47 @@ async function openKeeper(matchId) {
 }
 
 // Copie ou partage : doit partir directement d'un tap (iPhone/Safari refusent après un appel réseau), d'où la fenêtre intermédiaire.
-async function copyOrShare(url, action, input) {
+async function copyOrShare(url, action, input, done = 'Lien copié') {
   if (action === 'share') { try { await navigator.share({ title: 'Score keeper', url }); } catch {} return; }
   try { await navigator.clipboard.writeText(url); }
   catch {
     input.focus(); input.select(); input.setSelectionRange(0, url.length);
     if (!document.execCommand?.('copy')) throw new Error('Copie impossible : le lien est sélectionné, copiez-le à la main.');
   }
-  toast('Lien copié');
+  toast(done);
 }
 
+const fmtCode = (c) => `${c.slice(0, 3)}-${c.slice(3)}`;
+const codeMessage = (c) => `Code score keeper : ${fmtCode(c)}\nSaisissez-le sur ${location.origin} pour compter les points du match.`;
+
 async function shareKeeperLink(matchId) {
-  const { token: tk } = await api(`/api/matches/${matchId}/live`, 'POST');
-  const url = `${location.origin}/#/live/${tk}`;
-  openDialog(`<h3>Lien du score keeper</h3>
-    <p class="muted">Envoyez ce lien à la paire qui va compter les points. Il reste valable jusqu'à la saisie du résultat.</p>
-    <input id="kurl" readonly value="${esc(url)}" onfocus="this.select()">
+  const { code } = await api(`/api/matches/${matchId}/live`, 'POST');
+  openDialog(`<h3>Code du score keeper</h3>
+    <p class="muted">Donnez ce code à la paire qui va compter les points : elle le saisit dans « Code score keeper » sur la page d'accueil ou l'onglet Matchs. Il reste valable jusqu'à la saisie du résultat.</p>
+    <input id="kurl" class="kcode" readonly value="${esc(fmtCode(code))}" onfocus="this.select()">
     <div class="row" style="margin-top:16px;justify-content:flex-end"><button value="cancel" class="ghost">Fermer</button>${navigator.share ? '<button value="share">Partager</button>' : ''}<button value="copy" class="primary">Copier</button></div>`,
-  (f, action) => copyOrShare(url, action, $('#kurl')));
+  async (f, action) => {
+    if (action === 'share') { try { await navigator.share({ title: 'Score keeper', text: codeMessage(code) }); } catch {} return; }
+    await copyOrShare(codeMessage(code), 'copy', $('#kurl'), 'Code copié');
+  });
   load().catch(() => {});
 }
+
+// Champ où un joueur saisit le code reçu d'un organisateur pour ouvrir le score keeper.
+const codeEntry = () => `<form class="card codeform" data-codeform>
+  <label for="kcode"><strong>Code score keeper</strong></label>
+  <div class="muted">Un organisateur vous a donné un code ? Saisissez-le pour compter les points.</div>
+  <div class="row" style="margin-top:8px"><input id="kcode" class="kcode" name="code" placeholder="ABC-DEF" maxlength="8" autocomplete="off" autocapitalize="characters" spellcheck="false" required><button class="primary">Ouvrir</button></div></form>`;
+
+app.addEventListener('submit', async (e) => {
+  const f = e.target.closest('[data-codeform]');
+  if (!f) return;
+  e.preventDefault();
+  try {
+    const { token: tk } = await api('/api/live-code', 'POST', { code: f.code.value });
+    location.hash = `#/live/${tk}`;
+  } catch (err) { toast(err.message); }
+});
 
 app.addEventListener('click', async (e) => {
   const b = e.target.closest('[data-keeper],[data-keeperlink],[data-livevalid],[data-liveclose]');
@@ -434,6 +456,7 @@ const icsLinks = (team) => {
 };
 
 function matchesPanel() {
+  const entry = isAdmin() ? '' : codeEntry();
   const ms = cur.data.matches.filter((m) => !(m.stage === 'ko' && m.round === 1 && m.winner && (!m.team1 || !m.team2)));
   if (!ms.length) return '<div class="empty">Aucun match pour le moment.</div>';
   const f = cur.filter;
@@ -459,7 +482,7 @@ function matchesPanel() {
   }
   const ordered = [...sections.entries()].sort(([a], [b]) => (a[0] === b[0] ? parseInt(a.slice(2)) - parseInt(b.slice(2)) : a[0] === 'g' ? -1 : 1));
   const alert = nLate ? `<div class="card"><strong>⚠ ${nLate} match${nLate > 1 ? 's' : ''} en retard</strong>${nFf ? `<div class="muted">${nFf} dont la journée suivante a commencé : défaite 6-0 / 6-0 pour les deux paires.</div>${isAdmin() ? `<button class="danger small" id="applyFf" style="margin-top:8px">Appliquer ${nFf} forfait${nFf > 1 ? 's' : ''}</button>` : ''}` : ''}</div>` : '';
-  return `${alert}${isAdmin() ? `<div class="row" style="margin-top:12px"><button class="primary small" data-share="next">Partager les prochains matchs</button><button class="ghost small" data-share="next-copy" style="color:inherit">Copier</button></div><div style="margin-top:8px">${icsLinks()}</div>` : ''}<div class="row" style="margin-top:8px">${[['all', 'Tous'], ['todo', 'À jouer'], ['done', 'Terminés'], ['moved', 'Reportés'], ...(nLate ? [['late', `En retard (${nLate})`]] : [])].map(([k, l]) =>
+  return `${entry}${alert}${isAdmin() ? `<div class="row" style="margin-top:12px"><button class="primary small" data-share="next">Partager les prochains matchs</button><button class="ghost small" data-share="next-copy" style="color:inherit">Copier</button></div><div style="margin-top:8px">${icsLinks()}</div>` : ''}<div class="row" style="margin-top:8px">${[['all', 'Tous'], ['todo', 'À jouer'], ['done', 'Terminés'], ['moved', 'Reportés'], ...(nLate ? [['late', `En retard (${nLate})`]] : [])].map(([k, l]) =>
     `<button class="${f === k ? 'primary' : 'ghost'} small" data-filter="${k}" style="${f === k ? '' : 'color:inherit'}">${l}</button>`).join('')}</div>${selects}
     ${ordered.map(([, s]) => `<h2>${esc(s.title)}</h2>${s.items.map(matchCard).join('')}`).join('') || '<div class="empty">Aucun match dans cette catégorie.</div>'}`;
 }
@@ -1293,16 +1316,18 @@ async function keeperPoll() {
 
 function keeperMenu() {
   const k = keeper;
-  const url = `${location.origin}/#/live/${k.token}`;
+  const code = k.info.code;
   openDialog(`<h3>Score keeper</h3>
-    <p class="muted">Pour compter depuis un autre téléphone, envoyez-lui ce lien (valable jusqu'à la saisie du résultat).</p>
-    <input id="kurl" readonly value="${esc(url)}" onfocus="this.select()">
-    <div class="row" style="margin-top:8px">${navigator.share ? '<button value="share">Partager</button>' : ''}<button value="copy" class="primary">Copier le lien</button></div>
+    <p class="muted">Pour compter depuis un autre téléphone, donnez-lui ce code (valable jusqu'à la saisie du résultat).</p>
+    <input id="kurl" class="kcode" readonly value="${esc(fmtCode(code))}" onfocus="this.select()">
+    <div class="row" style="margin-top:8px">${navigator.share ? '<button value="share">Partager</button>' : ''}<button value="copy" class="primary">Copier le code</button></div>
     <div class="row" style="margin-top:16px"><button value="reset" class="danger small">Recommencer à zéro</button><button value="close" class="danger small">Fermer le score keeper</button></div>
     <div class="row" style="margin-top:16px;justify-content:flex-end"><button value="cancel" class="ghost">Retour</button></div>`,
   async (f, action) => {
-    if (action === 'share' || action === 'copy') {
-      await copyOrShare(url, action, $('#kurl'));
+    if (action === 'share') {
+      try { await navigator.share({ title: 'Score keeper', text: codeMessage(code) }); } catch {}
+    } else if (action === 'copy') {
+      await copyOrShare(codeMessage(code), 'copy', $('#kurl'), 'Code copié');
     } else if (action === 'reset') {
       if (!confirm('Remettre le score à zéro ?')) throw new Error('Annulé');
       k.points = []; k.status = 'live'; keeperChanged();

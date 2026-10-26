@@ -266,3 +266,6 @@ body.keeping main { max-width: none; padding: 0; }
   .kfinal { font-size: clamp(1.4rem, 8vh, 2.2rem); }
   .kbig { min-height: 52px; }
 }
+
+.kcode { text-align: center; font-size: 1.5rem; font-weight: 800; letter-spacing: .25em; text-transform: uppercase; }
+.codeform { margin-bottom: 12px; }

@@ -210,6 +210,7 @@ addCol('tournaments', 'legs', 'INTEGER NOT NULL DEFAULT 1');
 addCol('tournaments', 'third_place', 'INTEGER NOT NULL DEFAULT 1');
 addCol('tournaments', 'description', 'TEXT');
 addCol('tournaments', 'fee', 'INTEGER NOT NULL DEFAULT 150');
+addCol('live_scores', 'code', 'TEXT');
 addCol('tournaments', 'prev_id', 'INTEGER');
 addCol('teams', 'penalty', 'INTEGER NOT NULL DEFAULT 0');
 // Ancien format de nom automatique « A / B » → « A & B »
@@ -902,6 +903,18 @@ app.post('/api/tournaments/:id/knockout', admin, wrap((req, res) => {
 
 // Score keeper : un appareil compte les points en direct avec un lien secret propre au match.
 // Le résultat n'entre dans le classement qu'après validation par un organisateur (PUT /api/matches/:id habituel).
+// Code court à saisir par les joueurs à la place du lien : 6 caractères sans ambiguïté (ni 0/O ni 1/I/L), affiché « ABC-DEF ».
+const CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+const newLiveCode = () => {
+  for (;;) {
+    let c = '';
+    for (const b of crypto.randomBytes(6)) c += CODE_CHARS[b % CODE_CHARS.length];
+    if (!db.prepare('SELECT 1 FROM live_scores WHERE code = ?').get(c)) return c;
+  }
+};
+const normCode = (v) => String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
+for (const r of db.prepare('SELECT match_id FROM live_scores WHERE code IS NULL').all()) db.prepare('UPDATE live_scores SET code = ? WHERE match_id = ?').run(newLiveCode(), r.match_id);
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS live_scores_code ON live_scores(code)');
 const liveByToken = db.prepare('SELECT * FROM live_scores WHERE token = ?');
 const liveByMatch = db.prepare('SELECT * FROM live_scores WHERE match_id = ?');
 
@@ -914,10 +927,22 @@ app.post('/api/matches/:id/live', admin, wrap((req, res) => {
   if (m.winner) throw fail(409, 'Ce match a déjà un résultat');
   if (m.stage === 'group' && t.phase !== 'groups') throw fail(409, 'Les poules sont closes');
   const old = liveByMatch.get(m.id);
-  if (old) return res.json({ token: old.token });
-  const token = crypto.randomBytes(16).toString('hex');
-  db.prepare('INSERT INTO live_scores (match_id, token, points, status, updated_at) VALUES (?, ?, \'[]\', \'live\', ?)').run(m.id, token, Date.now());
-  res.json({ token });
+  if (old) return res.json({ token: old.token, code: old.code });
+  const token = crypto.randomBytes(16).toString('hex'), code = newLiveCode();
+  db.prepare('INSERT INTO live_scores (match_id, token, code, points, status, updated_at) VALUES (?, ?, ?, \'[]\', \'live\', ?)').run(m.id, token, code, Date.now());
+  res.json({ token, code });
+}));
+
+// Public : un joueur saisit le code reçu d'un organisateur et obtient l'accès au comptage (même limite d'essais que la connexion).
+const codeAttempts = new Map();
+app.post('/api/live-code', wrap((req, res) => {
+  const ip = req.ip;
+  const a = codeAttempts.get(ip) || { n: 0, t: Date.now() };
+  if (Date.now() - a.t > 15 * 60e3) { a.n = 0; a.t = Date.now(); }
+  if (a.n >= 15) throw fail(429, 'Trop d\'essais, réessayez dans quelques minutes');
+  const l = db.prepare('SELECT token FROM live_scores WHERE code = ?').get(normCode(req.body.code));
+  if (!l) { codeAttempts.set(ip, { ...a, n: a.n + 1 }); throw fail(404, 'Code inconnu, ou score keeper déjà fermé'); }
+  res.json({ token: l.token });
 }));
 
 app.get('/api/live/:token', wrap((req, res) => {
@@ -929,7 +954,7 @@ app.get('/api/live/:token', wrap((req, res) => {
   res.json({
     slug: t.slug, tournament: t.name,
     match: { id: m.id, stage: m.stage, round: m.round, grp: m.grp, court: m.court, time: m.time, date: m.date, team1: team(m.team1), team2: team(m.team2) },
-    points: JSON.parse(l.points), status: l.status, updated_at: l.updated_at,
+    points: JSON.parse(l.points), status: l.status, updated_at: l.updated_at, code: l.code,
   });
 }));
 
