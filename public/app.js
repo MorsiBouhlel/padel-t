@@ -67,9 +67,15 @@ async function act(fn, okMsg) {
 
 // --- Routage -----------------------------------------------------------------
 async function render() {
+  keeperStop();
   const m = location.hash.match(/^#\/t\/([\w-]+)(?:\/team\/(\d+))?/);
+  const k = location.hash.match(/^#\/live\/(\w+)/);
   try {
-    if (m) {
+    if (k) {
+      cur = null;
+      $('#bell').hidden = true;
+      await renderKeeper(k[1]);
+    } else if (m) {
       if (!cur || cur.slug !== m[1]) cur = { slug: m[1], tab: null, filter: 'all', data: null };
       cur.team = m[2] ? Number(m[2]) : null;
       await load();
@@ -80,6 +86,7 @@ async function render() {
       await renderHome();
     }
   } catch (e) {
+    keeperStop();
     app.innerHTML = `<div class="empty">${esc(e.message)}<p><a href="#/">Retour</a></p></div>`;
   }
 }
@@ -91,21 +98,39 @@ async function load() {
   cur.log = isAdmin() ? await api(`/api/tournaments/${cur.data.tournament.id}/audit`).catch(() => []) : null;
   cur.followers = isAdmin() ? await api(`/api/tournaments/${cur.data.tournament.id}/followers`).catch(() => null) : null;
   if (!cur.tab) cur.tab = { setup: isAdmin() ? 'teams' : 'info', groups: 'groups' }[cur.data.tournament.phase] || 'bracket';
+  if (isAdmin() && (cur.tab === 'chances' || cur.team)) await loadForecast();
   renderTournament();
 }
 
 // --- Accueil -------------------------------------------------------------------
 async function renderHome() {
   const list = await api('/api/tournaments');
-  const archived = list.filter((t) => t.phase === 'finished');
-  const card = (items) => items.map((t) => `
+  const meta = (t) => [t.date && new Date(t.date).toLocaleDateString('fr-FR'), t.location, `${t.teams} équipe${t.teams > 1 ? 's' : ''}`].filter(Boolean).map(esc).join(' · ');
+  const arrow = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>';
+  // Grande carte pour un tournoi en cours : avancement et prochain match.
+  const live = (t) => {
+    const d = t.next && new Date(`${t.next.date}T12:00:00`);
+    const pct = t.matches ? Math.round((t.played / t.matches) * 100) : 0;
+    return `<a class="card tcard" href="#/t/${esc(t.slug)}">
+      <div class="row between"><span class="badge live">EN COURS</span><span class="muted">${PHASES[t.phase]}</span></div>
+      <h2>${esc(t.name)}</h2><div class="muted">${meta(t)}</div>
+      ${t.matches ? `<div class="row between" style="margin-top:14px"><strong>${t.played} match${t.played > 1 ? 's' : ''} joué${t.played > 1 ? 's' : ''}</strong><span class="muted">sur ${t.matches}</span></div><div class="bar"><i style="width:${pct}%"></i></div>` : ''}
+      ${t.next ? `<div class="next"><div class="datechip"><b>${d.getDate()}</b><span>${esc(d.toLocaleDateString('fr-FR', { month: 'short' }))}</span></div>
+        <div class="grow"><div class="muted">Prochain match${t.next.time ? ` · ${esc(t.next.time)}` : ''}</div><strong>${esc(t.next.t1)} – ${esc(t.next.t2)}</strong></div></div>` : ''}
+      <span class="cta">Voir le tournoi ${arrow}</span></a>`;
+  };
+  const simple = (t) => `
       <a class="card" href="#/t/${esc(t.slug)}">
-        <div class="row between"><strong>${esc(t.name)}</strong><span class="badge ${t.phase === 'groups' || t.phase === 'knockout' ? 'live' : ''}">${PHASES[t.phase]}</span></div>
-        <div class="muted">${[t.date && new Date(t.date).toLocaleDateString('fr-FR'), t.location, `${t.teams} équipe${t.teams > 1 ? 's' : ''}`].filter(Boolean).map(esc).join(' · ')}</div>
-      </a>`).join('');
+        <div class="row between"><strong>${esc(t.name)}</strong><span class="badge">${PHASES[t.phase]}</span></div>
+        <div class="muted">${meta(t)}</div>
+      </a>`;
+  const running = list.filter((t) => t.phase === 'groups' || t.phase === 'knockout');
+  const others = list.filter((t) => t.phase === 'setup');
+  const archived = list.filter((t) => t.phase === 'finished');
   app.innerHTML = `
-    <div class="row between"><h1>Tournois</h1>${isAdmin() ? '<button id="new" class="primary">+ Nouveau</button>' : ''}</div>
-    ${list.length ? card(list.filter((t) => t.phase !== 'finished')) + (archived.length ? `<h2>Archives</h2>${card(archived)}` : '') : '<div class="empty">Aucun tournoi pour le moment.</div>'}`;
+    ${isAdmin() ? '<div class="row between"><h1>Tournois</h1><button id="new" class="primary">+ Nouveau</button></div>' : ''}
+    ${isAdmin() ? '' : codeEntry()}
+    ${list.length ? running.map(live).join('') + others.map(simple).join('') + (archived.length ? `<h2>Archives</h2>${archived.map(simple).join('')}` : '') : '<div class="empty">Aucun tournoi pour le moment.</div>'}`;
   $('#new')?.addEventListener('click', () => tournamentDialog());
 }
 
@@ -168,23 +193,23 @@ function nextEditionDialog() {
 function renderTournament() {
   if (cur.team) return renderTeamPage();
   const { tournament: t, teams } = cur.data;
-  if ((cur.tab === 'pay' || cur.tab === 'log' || cur.tab === 'dash' || cur.tab === 'teams') && !isAdmin()) cur.tab = t.phase === 'setup' ? 'info' : 'groups';
-  const tabs = [...(isAdmin() ? [['teams', 'Équipes']] : []), ['groups', 'Classement'], ['matches', 'Matchs'], ['bracket', 'Play-offs'], ['stats', 'Stats'], ['info', 'Infos'], ...(isAdmin() ? [['dash', 'Suivi'], ['pay', 'Paiements'], ['log', 'Historique']] : [])];
+  if ((cur.tab === 'pay' || cur.tab === 'log' || cur.tab === 'dash' || cur.tab === 'manage' || cur.tab === 'chances' || cur.tab === 'teams') && !isAdmin()) cur.tab = t.phase === 'setup' ? 'info' : 'groups';
+  const adminTabs = [['teams', 'Équipes'], ['dash', 'Suivi'], ['pay', 'Paiements'], ['log', 'Historique'], ['manage', 'Gestion']];
   document.title = `${t.name} · Padel`;
   app.innerHTML = `
-    <a href="#/" class="muted">← Tous les tournois</a>
-    <div class="row between"><h1>${esc(t.name)}</h1><span class="badge ${t.phase === 'groups' || t.phase === 'knockout' ? 'live' : ''}">${PHASES[t.phase]}</span></div>
-    <div class="muted">${[t.date && new Date(t.date).toLocaleDateString('fr-FR', { dateStyle: 'full' }), t.location, `${teams.length} équipes`].filter(Boolean).map(esc).join(' · ')}</div>
-    <div class="row" style="margin-top:10px">
-      <button class="ghost small" id="share" style="color:inherit">Copier le lien</button>
-      <button class="ghost small" id="notif" style="color:inherit" data-off="🔔 Activer les notifications" data-on="🔔 Notifications ✓">🔔 Notifications</button>
-      ${isAdmin() ? '<button class="ghost small" id="settings" style="color:inherit">Réglages</button>' : ''}
-      ${isAdmin() ? '<button class="ghost small" id="broadcast" style="color:inherit">📣 Notifier tout le monde</button>' : ''}
-      ${isAdmin() && t.phase !== 'setup' && !t.next ? '<button class="ghost small" id="nextEd" style="color:inherit">Édition suivante</button>' : ''}
+    <div class="hero">
+      <div class="row between"><a href="#/" class="back">← Tous les tournois</a><span class="badge ${t.phase === 'groups' || t.phase === 'knockout' ? 'live' : ''}">${PHASES[t.phase]}</span></div>
+      <h1>${esc(t.name)}</h1>
+      <div class="muted">${[t.date && new Date(t.date).toLocaleDateString('fr-FR', { dateStyle: 'full' }), t.location, `${teams.length} équipes`].filter(Boolean).map(esc).join(' · ')}</div>
+      <div class="row" style="margin-top:10px">
+        <button class="ghost small" id="share" style="color:inherit">Copier le lien</button>
+        <button class="ghost small" id="notif" style="color:inherit" data-off="🔔 Activer les notifications" data-on="🔔 Notifications ✓">🔔 Notifications</button>
+      </div>
+      ${t.prev || t.next ? `<div class="muted" style="margin-top:8px">${[t.prev && `← <a href="#/t/${esc(t.prev.slug)}">${esc(t.prev.name)}</a>`, t.next && `<a href="#/t/${esc(t.next.slug)}">${esc(t.next.name)}</a> →`].filter(Boolean).join(' · ')}</div>` : ''}
     </div>
-    ${t.prev || t.next ? `<div class="muted" style="margin-top:6px">${[t.prev && `← <a href="#/t/${esc(t.prev.slug)}">${esc(t.prev.name)}</a>`, t.next && `<a href="#/t/${esc(t.next.slug)}">${esc(t.next.name)}</a> →`].filter(Boolean).join(' · ')}</div>` : ''}
-    <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button role="tab" data-tab="${k}" aria-selected="${cur.tab === k}">${l}</button>`).join('')}</div>
-    <div id="panel">${{ teams: teamsPanel, groups: groupsPanel, matches: matchesPanel, bracket: bracketPanel, stats: statsPanel, info: infoPanel, dash: dashPanel, pay: payPanel, log: logPanel }[cur.tab]()}</div>`;
+    ${isAdmin() ? `<div class="chips"><span class="lab">Organisation</span>${adminTabs.map(([k, l]) => `<button data-tab="${k}" aria-selected="${cur.tab === k}">${l}</button>`).join('')}</div>` : ''}
+    <div id="panel" style="margin-top:6px">${{ teams: teamsPanel, groups: groupsPanel, matches: matchesPanel, bracket: bracketPanel, stats: statsPanel, chances: chancesPanel, live: livePanel, info: infoPanel, dash: dashPanel, pay: payPanel, log: logPanel, manage: managePanel }[cur.tab]()}</div>
+    ${navHtml(cur.tab)}`;
 
   $('#share').onclick = async () => {
     const url = `${location.origin}/#/t/${t.slug}`;
@@ -195,16 +220,19 @@ function renderTournament() {
   $('#settings')?.addEventListener('click', () => tournamentDialog(t));
   $('#broadcast')?.addEventListener('click', broadcastDialog);
   $('#nextEd')?.addEventListener('click', nextEditionDialog);
-  app.querySelectorAll('[data-tab]').forEach((b) => (b.onclick = () => { cur.tab = b.dataset.tab; renderTournament(); }));
+  app.querySelectorAll('[data-tab]').forEach((b) => (b.onclick = async () => {
+    cur.tab = b.dataset.tab;
+    renderTournament();
+    // Les prévisions se calculent à la demande : on les charge à l'ouverture de l'onglet.
+    if (cur.tab === 'chances' && isAdmin()) { await loadForecast(); if (cur.tab === 'chances') renderTournament(); }
+  }));
   bindPanel();
 }
 
 // Joueurs « A & B », affichés sous le nom seulement s'il diffère (nom de paire personnalisé) : sinon rien.
 const playersLine = (x) => { const l = [x.p1, x.p2].filter(Boolean).join(' & '); return l && l !== x.name ? l : ''; };
 // --- Photos des joueurs ----------------------------------------------------
-// Avatars affichés seulement si au moins un joueur du tournoi a une photo (sinon l'interface reste inchangée) ;
-// les joueurs sans photo ont alors leur initiale.
-const hasPhotos = () => cur.data.teams.some((x) => x.photo1 || x.photo2);
+// Avatars : photo du joueur, ou son initiale à défaut.
 function avatar(x, n, px) {
   const name = n === 1 ? x.p1 : x.p2;
   if (!name) return '';
@@ -215,7 +243,7 @@ function avatar(x, n, px) {
 }
 const avatars = (id, px = 28) => {
   const x = cur.data.teams.find((t) => t.id === id);
-  return x && hasPhotos() && (x.p1 || x.p2) ? `<span class="avs">${avatar(x, 1, px)}${avatar(x, 2, px)}</span>` : '';
+  return x && (x.p1 || x.p2) ? `<span class="avs">${avatar(x, 1, px)}${avatar(x, 2, px)}</span>` : '';
 };
 
 // Photo carrée 256 px en JPEG : léger à envoyer et à afficher, quelle que soit la photo d'origine.
@@ -234,6 +262,24 @@ async function uploadPhoto(teamId, n, file) {
   const res = await fetch(`/api/teams/${teamId}/photo/${n}`, { method: 'PUT', headers: { 'Content-Type': 'image/jpeg', Authorization: `Bearer ${token}` }, body });
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Envoi impossible');
 }
+
+// Navigation du bas : onglets publics, icônes en trait fin.
+const NAV = [
+  ['groups', 'Classement', 'M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0z'],
+  ['matches', 'Matchs', 'M5 5h14v15H5zM5 10h14M9 3v4M15 3v4'],
+  ['live', 'Live', 'M12 12h.01M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M5.5 5.5a9 9 0 0 0 0 13M18.5 5.5a9 9 0 0 1 0 13'],
+  ['bracket', 'Play-offs', 'M4 5h5v4H4zM4 15h5v4H4zM9 7h4v10H9M13 12h7'],
+  ['chances', 'Chances', 'M19 5L5 19M7.5 7.5h.01M16.5 16.5h.01'],
+  ['stats', 'Stats', 'M5 20V10M12 20V4M19 20v-7'],
+  ['info', 'Infos', 'M12 8h.01M11 12h1v5h1M3 12a9 9 0 1 0 18 0 9 9 0 0 0-18 0'],
+];
+// Parties en cours de comptage (score keeper) : l'onglet Live n'apparaît que s'il y en a, pour ne pas surcharger la barre.
+const liveMatches = () => cur.data.matches.filter((m) => m.live && !m.winner && m.live.status === 'live' && m.live.points > 0);
+const navHtml = (active) => {
+  const n = liveMatches().length;
+  return `<nav class="tabs" role="tablist" aria-label="Sections du tournoi">${NAV.filter(([k]) => (k !== 'chances' || isAdmin()) && (k !== 'live' || n || active === 'live')).map(([k, l, d]) =>
+    `<button role="tab" data-tab="${k}" aria-selected="${active === k}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${d}"/></svg>${l}${k === 'live' && n ? '<i class="navdot"></i>' : ''}</button>`).join('')}</nav>`;
+};
 
 const teamName = (id) => (cur.data.teams.find((t) => t.id === id) || {}).name;
 const teamLink = (id) => `<a class="tlink" href="#/t/${esc(cur.slug)}/team/${id}">${esc(teamName(id))}</a>`;
@@ -277,7 +323,11 @@ function teamsPanel() {
 function groupsPanel() {
   const { standings, tournament: t } = cur.data;
   if (!standings.length) return '<div class="empty">Le classement sera affiché après le lancement du championnat.</div>';
-  return standings.map((g) => `
+  const podium = (rows) => {
+    const col = (r, cls) => `<div class="${cls}">${avatars(r.id, 40)}<div class="nm">${teamLink(r.id)}</div><div class="pts">${r.points} pts</div><div class="step">${r.rank}</div></div>`;
+    return rows.length >= 3 && rows[0].played > 0 ? `<div class="card"><div class="podium">${col(rows[1], 'p2')}${col(rows[0], 'p1')}${col(rows[2], 'p3')}</div></div>` : '';
+  };
+  return standings.map((g) => `${podium(g.rows)}
     <div class="card">
       ${t.groups_count > 1 ? `<h3>Poule ${groupLetter(g.group)}</h3>` : ''}
       <table><thead><tr><th>#</th><th class="name">Équipe</th><th title="Matchs joués">J</th><th title="Victoires">V</th><th title="Défaites">D</th><th title="Jeux marqués">Pour</th><th title="Différence de jeux">Diff</th><th>Pts</th></tr></thead>
@@ -308,15 +358,114 @@ function matchCard(m) {
   const meta = [label, m.date && fmtDate(m.date), m.time, m.court, moved, lateTag, forfeit && `<strong>${forfeit}</strong>`].filter(Boolean).map((x) => (x.includes('<strong>') ? x : x.startsWith('Reporté') ? x : esc(x))).join(' · ');
   const tag = editable ? 'button' : 'div';
   return `<${tag} class="match ${m.winner || bye ? '' : 'todo'} ${editable ? 'editable' : ''}" ${editable ? `data-match="${m.id}"` : ''}>
-    ${line(m.team1, 0)}${line(m.team2, 1)}<div class="meta">${meta}${editable && !m.winner ? ' · Saisir le score' : ''}</div></${tag}>`;
+    ${line(m.team1, 0)}${line(m.team2, 1)}<div class="meta">${meta}${editable && !m.winner ? ' · Saisir le score' : ''}</div></${tag}>${liveBar(m)}`;
 }
+
+// Score keeper : bandeau sous un match à jouer (lancer / en direct / résultat proposé à valider).
+const liveText = (l) => (l.winner ? l.sets.map((x) => x.join('-')).join(' ') : `${[...l.sets.map((x) => x.join('-')), l.games.join('-')].join(' ')} · ${l.pts.join('-')}`);
+const keeperToken = (id) => { try { return localStorage.getItem(`keeperMatch:${id}`); } catch { return null; } };
+function liveBar(m) {
+  if (m.winner || !m.team1 || !m.team2 || !(m.stage === 'ko' || cur.data.tournament.phase === 'groups')) return '';
+  const l = m.live, own = keeperToken(m.id), adm = isAdmin();
+  const close = adm ? `<button class="small ghost" data-liveclose="${m.id}">${l?.status === 'submitted' ? 'Rejeter' : '✕ Fermer'}</button>` : '';
+  if (l?.status === 'submitted') {
+    return `<div class="livebar sub"><span>✅ Résultat envoyé : <strong>${esc(l.sets.map((x) => x.join('-')).join(' '))}</strong>${adm ? '' : ' · en attente de validation'}</span>
+      ${adm ? `<button class="small primary" data-livevalid="${m.id}">Valider</button>` : ''}${close}</div>`;
+  }
+  // Seuls les organisateurs créent le lien ; les joueurs l'ouvrent depuis le lien reçu (et peuvent reprendre sur leur appareil).
+  const open = adm || own ? `<button class="small" data-keeper="${m.id}">▶ ${l?.points ? 'Reprendre' : 'Score keeper'}</button>` : '';
+  const link = adm ? `<button class="small ghost" data-keeperlink="${m.id}">🔗 Lien</button>` : '';
+  if (l?.points) return `<div class="livebar"><span><i class="livedot"></i> En direct · <strong>${esc(liveText(l))}</strong></span>${open}${link}${close}</div>`;
+  return adm ? `<div class="livebar">${open}${link}${l ? close : ''}</div>` : '';
+}
+
+async function openKeeper(matchId) {
+  let tk = null;
+  if (isAdmin()) tk = (await api(`/api/matches/${matchId}/live`, 'POST')).token;
+  else {
+    tk = keeperToken(matchId);
+    try { await api(`/api/live/${tk}`); } catch (e) { try { localStorage.removeItem(`keeperMatch:${matchId}`); } catch {} throw e; }
+  }
+  location.hash = `#/live/${tk}`;
+}
+
+// Copie ou partage : doit partir directement d'un tap (iPhone/Safari refusent après un appel réseau), d'où la fenêtre intermédiaire.
+async function copyOrShare(url, action, input, done = 'Lien copié') {
+  if (action === 'share') { try { await navigator.share({ title: 'Score keeper', url }); } catch {} return; }
+  try { await navigator.clipboard.writeText(url); }
+  catch {
+    input.focus(); input.select(); input.setSelectionRange(0, url.length);
+    if (!document.execCommand?.('copy')) throw new Error('Copie impossible : le lien est sélectionné, copiez-le à la main.');
+  }
+  toast(done);
+}
+
+const fmtCode = (c) => `${c.slice(0, 3)}-${c.slice(3)}`;
+const codeMessage = (c) => `Code score keeper : ${fmtCode(c)}\nSaisissez-le sur ${location.origin} pour compter les points du match.`;
+
+async function shareKeeperLink(matchId) {
+  const { code } = await api(`/api/matches/${matchId}/live`, 'POST');
+  openDialog(`<h3>Code du score keeper</h3>
+    <p class="muted">Donnez ce code à la paire qui va compter les points : elle le saisit dans « Code score keeper » sur la page d'accueil ou l'onglet Matchs. Il reste valable jusqu'à la saisie du résultat.</p>
+    <input id="kurl" class="kcode" readonly value="${esc(fmtCode(code))}" onfocus="this.select()">
+    <div class="row" style="margin-top:16px;justify-content:flex-end"><button value="cancel" class="ghost">Fermer</button>${navigator.share ? '<button value="share">Partager</button>' : ''}<button value="copy" class="primary">Copier</button></div>`,
+  async (f, action) => {
+    if (action === 'share') { try { await navigator.share({ title: 'Score keeper', text: codeMessage(code) }); } catch {} return; }
+    await copyOrShare(codeMessage(code), 'copy', $('#kurl'), 'Code copié');
+  });
+  load().catch(() => {});
+}
+
+// Champ où un joueur saisit le code reçu d'un organisateur pour ouvrir le score keeper.
+const codeEntry = () => `<form class="card codeform" data-codeform>
+  <label for="kcode"><strong>Code score keeper</strong></label>
+  <div class="muted">Un organisateur vous a donné un code ? Saisissez-le pour compter les points.</div>
+  <div class="row" style="margin-top:8px"><input id="kcode" class="kcode" name="code" placeholder="ABC-DEF" maxlength="8" autocomplete="off" autocapitalize="characters" spellcheck="false" required><button class="primary">Ouvrir</button></div></form>`;
+
+app.addEventListener('submit', async (e) => {
+  const f = e.target.closest('[data-codeform]');
+  if (!f) return;
+  e.preventDefault();
+  try {
+    const { token: tk } = await api('/api/live-code', 'POST', { code: f.code.value });
+    location.hash = `#/live/${tk}`;
+  } catch (err) { toast(err.message); }
+});
+
+app.addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-keeper],[data-keeperlink],[data-livevalid],[data-liveclose]');
+  if (!b) return;
+  try {
+    if (b.dataset.keeper) await openKeeper(b.dataset.keeper);
+    else if (b.dataset.keeperlink) await shareKeeperLink(b.dataset.keeperlink);
+    else if (b.dataset.livevalid) {
+      const m = cur.data.matches.find((x) => x.id == b.dataset.livevalid);
+      await api(`/api/matches/${m.id}`, 'PUT', { sets: m.live.sets });
+      await load(); toast('Résultat validé');
+    } else if (b.dataset.liveclose) {
+      if (!confirm('Fermer ce score keeper ? Les points comptés seront perdus.')) return;
+      await api(`/api/matches/${b.dataset.liveclose}/live`, 'DELETE');
+      await load(); toast('Score keeper fermé');
+    }
+  } catch (err) { toast(err.message); }
+});
 
 const icsLinks = (team) => {
   const path = `/api/t/${cur.slug}/calendar.ics${team ? `?team=${team}` : ''}`;
   return `<span class="muted">Agenda : <a href="webcal://${location.host}${path}">s'abonner</a> · <a href="${path}" download>télécharger .ics</a></span>`;
 };
 
+// Journées repliables : choix mémorisé dans cur.secOpen ; par défaut seule la première journée
+// avec un match à jouer est ouverte (tout est ouvert si un filtre de journée est actif).
+function isSectOpen(key, s, ordered) {
+  if (cur.secOpen?.[key] !== undefined) return cur.secOpen[key];
+  if (cur.fRound) return true;
+  const first = ordered.find(([, x]) => x.items.some((m) => !m.winner)) || ordered[ordered.length - 1];
+  return first?.[0] === key;
+}
+
 function matchesPanel() {
+  const entry = isAdmin() ? '' : codeEntry();
   const ms = cur.data.matches.filter((m) => !(m.stage === 'ko' && m.round === 1 && m.winner && (!m.team1 || !m.team2)));
   if (!ms.length) return '<div class="empty">Aucun match pour le moment.</div>';
   const f = cur.filter;
@@ -342,9 +491,9 @@ function matchesPanel() {
   }
   const ordered = [...sections.entries()].sort(([a], [b]) => (a[0] === b[0] ? parseInt(a.slice(2)) - parseInt(b.slice(2)) : a[0] === 'g' ? -1 : 1));
   const alert = nLate ? `<div class="card"><strong>⚠ ${nLate} match${nLate > 1 ? 's' : ''} en retard</strong>${nFf ? `<div class="muted">${nFf} dont la journée suivante a commencé : défaite 6-0 / 6-0 pour les deux paires.</div>${isAdmin() ? `<button class="danger small" id="applyFf" style="margin-top:8px">Appliquer ${nFf} forfait${nFf > 1 ? 's' : ''}</button>` : ''}` : ''}</div>` : '';
-  return `${alert}${isAdmin() ? `<div class="row" style="margin-top:12px"><button class="primary small" data-share="next">Partager les prochains matchs</button><button class="ghost small" data-share="next-copy" style="color:inherit">Copier</button></div><div style="margin-top:8px">${icsLinks()}</div>` : ''}<div class="row" style="margin-top:8px">${[['all', 'Tous'], ['todo', 'À jouer'], ['done', 'Terminés'], ['moved', 'Reportés'], ...(nLate ? [['late', `En retard (${nLate})`]] : [])].map(([k, l]) =>
+  return `${entry}${alert}${isAdmin() ? `<div class="row" style="margin-top:12px"><button class="primary small" data-share="next">Partager les prochains matchs</button><button class="ghost small" data-share="next-copy" style="color:inherit">Copier</button></div><div style="margin-top:8px">${icsLinks()}</div>` : ''}<div class="row" style="margin-top:8px">${[['all', 'Tous'], ['todo', 'À jouer'], ['done', 'Terminés'], ['moved', 'Reportés'], ...(nLate ? [['late', `En retard (${nLate})`]] : [])].map(([k, l]) =>
     `<button class="${f === k ? 'primary' : 'ghost'} small" data-filter="${k}" style="${f === k ? '' : 'color:inherit'}">${l}</button>`).join('')}</div>${selects}
-    ${ordered.map(([, s]) => `<h2>${esc(s.title)}</h2>${s.items.map(matchCard).join('')}`).join('') || '<div class="empty">Aucun match dans cette catégorie.</div>'}`;
+    ${ordered.map(([k, s]) => `<details class="sect" data-sect="${k}" ${isSectOpen(k, s, ordered) ? 'open' : ''}><summary><h2>${esc(s.title)}</h2><span class="muted">${s.items.filter((m) => m.winner).length}/${s.items.length}</span></summary>${s.items.map(matchCard).join('')}</details>`).join('') || '<div class="empty">Aucun match dans cette catégorie.</div>'}`;
 }
 
 // Export WhatsApp : texte (wa.me) et image du classement (partage natif, sinon téléchargement)
@@ -442,31 +591,36 @@ function renderTeamPage() {
   const played = mine.filter((m) => m.winner).sort((a, b) => (b.stage === a.stage ? b.round - a.round : a.stage === 'ko' ? -1 : 1));
   const upcoming = mine.filter((m) => !m.winner && (m.team1 && m.team2)).sort((a, b) => (a.date || '9').localeCompare(b.date || '9') || a.round - b.round);
   const form = [...played].reverse().slice(-5).map((m) => (m.winner === team.id ? 'V' : 'D'));
-  const stat = (v, l) => `<div class="card" style="text-align:center;margin:0"><div style="font-size:1.4rem;font-weight:700">${v}</div><div class="muted">${l}</div></div>`;
   const section = (title, list) => list.length ? `<h2>${title}</h2>${list.map(matchCard).join('')}` : '';
   const ko = mine.filter((m) => m.stage === 'ko');
   app.innerHTML = `
-    <a href="#/t/${esc(cur.slug)}" class="muted">← ${esc(t.name)}</a>
-    ${team.photo1 || team.photo2 ? `<div class="row" style="gap:18px;margin:10px 0 2px">${[1, 2].map((n) => (n === 1 ? team.p1 : team.p2) ? `<div style="text-align:center">${avatar(team, n, 84)}<div class="muted" style="margin-top:4px">${esc(n === 1 ? team.p1 : team.p2)}</div></div>` : '').join('')}</div>` : ''}
-    <h1>${esc(team.name)}</h1>
-    ${playersLine(team) ? `<div class="muted">${esc(playersLine(team))}</div>` : ''}
-    <div class="row" style="margin-top:8px">
-      ${row ? `<span class="badge ${row.rank <= t.qualifiers ? 'live' : ''}">${row.rank}${row.rank === 1 ? 'er' : 'e'} du classement${row.rank <= t.qualifiers ? ' · zone de qualification' : ''}</span>` : ''}
-      ${team.penalty ? `<span class="badge" style="background:var(--danger);color:#fff">Pénalité −${team.penalty} pt${team.penalty > 1 ? 's' : ''}</span>` : ''}
-      ${team.reports ? `<span class="badge">${team.reports} report${team.reports > 1 ? 's' : ''}</span>` : ''}
-      <button class="ghost small" id="share" style="color:inherit">Copier le lien</button>
-      <button class="ghost small" id="notif" style="color:inherit" data-off="🔔 Suivre cette paire" data-on="🔔 Notifications ✓">🔔 Suivre cette paire</button>
+    <div class="hero tall"><a href="#/t/${esc(cur.slug)}" class="back">← ${esc(t.name)}</a></div>
+    <div class="card overlap pairhead">
+      <div class="faces">${avatar(team, 1, 92)}${avatar(team, 2, 92)}</div>
+      <h1>${esc(team.name)}</h1>
+      ${playersLine(team) ? `<div class="muted">${esc(playersLine(team))}</div>` : ''}
+      <div class="row" style="margin-top:10px;justify-content:center">
+        ${row ? `<span class="badge ${row.rank <= t.qualifiers ? 'live' : ''}">${row.rank}${row.rank === 1 ? 'er' : 'e'} du classement${row.rank <= t.qualifiers ? ' · zone de qualification' : ''}</span>` : ''}
+        ${team.penalty ? `<span class="badge" style="background:var(--danger);color:#fff">Pénalité −${team.penalty} pt${team.penalty > 1 ? 's' : ''}</span>` : ''}
+        ${team.reports ? `<span class="badge">${team.reports} report${team.reports > 1 ? 's' : ''}</span>` : ''}
+      </div>
+      <div class="row" style="margin-top:14px;justify-content:center">
+        <button class="ghost small" id="notif" style="color:inherit" data-off="🔔 Suivre cette paire" data-on="🔔 Notifications ✓">🔔 Suivre cette paire</button>
+        <button class="ghost small" id="share" style="color:inherit">Copier le lien</button>
+      </div>
+      <div style="margin-top:10px">${icsLinks(team.id)}</div>
     </div>
-    <div style="margin-top:8px">${icsLinks(team.id)}</div>
-    ${row ? `<div class="grid2" style="grid-template-columns:repeat(4,1fr);margin-top:14px;gap:8px">
-      ${stat(row.points, 'Points')}${stat(row.played, 'Joués')}${stat(`${row.won}-${row.lost}`, 'V-D')}${stat(signed(row.gamesFor - row.gamesAgainst), 'Diff. jeux')}</div>
-      <p class="muted" style="margin-top:10px">Sets ${row.setsFor}-${row.setsAgainst} · Jeux ${row.gamesFor}-${row.gamesAgainst}${form.length ? ` · Forme : ${form.map((f) => `<strong style="color:var(${f === 'V' ? '--ok' : '--danger'})">${f}</strong>`).join(' ')}` : ''}</p>` : ''}
+    ${row ? `<div class="stats4">${[[row.points, 'Points'], [row.played, 'Joués'], [`${row.won}-${row.lost}`, 'V-D'], [signed(row.gamesFor - row.gamesAgainst), 'Diff. jeux']].map(([v, l]) => `<div><b>${v}</b><span>${l}</span></div>`).join('')}</div>
+      <div class="card row between"><div><strong>Forme</strong><div class="muted">Sets ${row.setsFor}-${row.setsAgainst} · Jeux ${row.gamesFor}-${row.gamesAgainst}</div></div>
+        <div class="row" style="gap:6px">${form.map((f) => `<span class="dot ${f === 'V' ? 'v' : 'd'}" aria-label="${f === 'V' ? 'Victoire' : 'Défaite'}">${f}</span>`).join('')}</div></div>` : ''}
+    ${(() => { const f = isAdmin() && cur.fc?.teams?.find((x) => x.id === team.id); if (!f) return ''; const ko = t.phase === 'knockout' || t.phase === 'finished'; return `<h2>Ses chances</h2><div class="stats4" style="grid-template-columns:repeat(3,minmax(0,1fr))">${[...(ko ? [['final', 'Finale']] : [['qualify', 'Qualification']]), ['podium', 'Podium'], ['champion', 'Victoire']].map(([k, l]) => `<div><b>${pct(f[k])}</b><span>${l}</span></div>`).join('')}</div>`; })()}
     ${team.changes?.length ? `<h2>Changements de partenaire</h2>${team.changes.map((c) => `<div class="card muted">J${c.round || '—'} · ${esc([c.old_p1, c.old_p2].filter(Boolean).join(' & '))} → <strong>${esc([c.new_p1, c.new_p2].filter(Boolean).join(' & '))}</strong>${c.penalty ? ` · −${c.penalty} pts` : ' · sans pénalité'}${c.reason ? ` · ${esc(c.reason)}` : ''}</div>`).join('')}` : ''}
     ${isAdmin() && t.phase === 'groups' ? '<div class="row" style="margin-top:12px"><button class="small" id="partner">Changer de partenaire</button></div>' : ''}
     ${section('Phase finale', ko)}
     ${section('Prochains matchs', upcoming.filter((m) => m.stage === 'group'))}
     ${section('Résultats', played.filter((m) => m.stage === 'group'))}
-    ${!mine.length ? '<div class="empty">Aucun match pour le moment.</div>' : ''}`;
+    ${!mine.length ? '<div class="empty">Aucun match pour le moment.</div>' : ''}
+    ${navHtml('groups')}`;
   $('#share').onclick = async () => {
     const url = `${location.origin}/#/t/${cur.slug}/team/${team.id}`;
     try { await navigator.clipboard.writeText(url); toast('Lien copié'); } catch { prompt('Lien de la paire', url); }
@@ -474,6 +628,7 @@ function renderTeamPage() {
   $('#notif').onclick = () => pushDialog(team.id);
   updateNotifButton();
   $('#partner')?.addEventListener('click', () => partnerDialog(team));
+  app.querySelectorAll('[data-tab]').forEach((b) => (b.onclick = () => { cur.tab = b.dataset.tab; location.hash = `#/t/${cur.slug}`; }));
   bindPanel();
 }
 
@@ -521,6 +676,20 @@ function computeStats() {
     }
   }
   return { teams: [...by.values()], records, done: order.length };
+}
+
+// Live : une carte par partie en cours, score recalculé par le serveur à partir des points du score keeper.
+function livePanel() {
+  const ms = liveMatches().sort((a, b) => b.live.updated_at - a.live.updated_at);
+  if (!ms.length) return '<div class="empty">Aucune partie en direct pour le moment.<p class="muted">Les parties comptées avec le score keeper apparaissent ici.</p></div>';
+  const { tournament: t } = cur.data;
+  const row = (m, i) => {
+    const l = m.live, id = i ? m.team2 : m.team1;
+    return `<div class="lrow"><span class="ln">${teamLink(id)}</span>${l.sets.map((x) => `<span class="ls ${x[i] > x[1 - i] ? 'w' : ''}">${x[i]}</span>`).join('')}<span class="ls cur">${l.games[i]}</span><span class="lp">${esc(l.pts[i])}</span></div>`;
+  };
+  const label = (m) => (m.stage === 'group' ? (t.groups_count > 1 ? `Poule ${groupLetter(m.grp)} · J${m.round}` : `Journée ${m.round}`) : m.pos === 1 && m.round === cur.data.koRounds ? cur.data.thirdName : cur.data.roundNames[m.round]);
+  return `<p class="muted" style="margin:4px 2px 10px">${ms.length} partie${ms.length > 1 ? 's' : ''} en direct · mise à jour automatique</p>`
+    + ms.map((m) => `<div class="card livecard"><div class="row between"><span class="muted"><i class="livedot"></i> En direct · ${esc([label(m), m.court].filter(Boolean).join(' · '))}</span>${m.live.tb ? '<span class="badge">Tie-break</span>' : ''}</div>${row(m, 0)}${row(m, 1)}</div>`).join('');
 }
 
 function statsPanel() {
@@ -573,6 +742,7 @@ function dashPanel() {
   const round = group.reduce((r, m) => (m.winner || (m.date && m.date <= today) ? Math.max(r, m.round) : r), 0);
   const nextDate = ready.filter((m) => !m.winner && m.date && m.date >= today).map((m) => m.date).sort()[0];
 
+  const proposed = ready.filter((m) => !m.winner && m.live?.status === 'submitted');
   const ff = group.filter((m) => m.late === 'forfeit');
   const late = group.filter((m) => m.late === 'late');
   const noDate = t.phase === 'groups' ? group.filter((m) => !m.winner && !m.date && m.round <= round + 1) : [];
@@ -590,6 +760,7 @@ function dashPanel() {
   const sections = [
     ff.length && card('⚠ Forfaits à appliquer', ff, { tone: 'var(--danger)', goto: 'matches:late', gotoLabel: 'Voir et appliquer', lines: (m) => `${vs(m)} <span class="muted">· prévu ${fmtDate(m.date)}, journée suivante commencée</span>` }),
     late.length && card('⏰ Matchs en retard', late, { tone: '#d98e04', goto: 'matches:late', gotoLabel: 'Voir les matchs en retard', lines: (m) => `${vs(m)} <span class="muted">· depuis ${dayDiff(m.date)} j${m.deadline ? `, limite ${fmtDate(m.deadline)}` : ''}</span>` }),
+    proposed.length && card('📲 Scores à valider', proposed, { tone: 'var(--ok)', goto: 'matches:all', gotoLabel: 'Ouvrir les matchs', lines: (m) => `${vs(m)} <span class="muted">· ${esc(m.live.sets.map((x) => x.join('-')).join(' '))}</span> <button class="small primary" data-livevalid="${m.id}">Valider</button>` }),
     noDate.length && card('📅 Matchs à planifier (journée en cours et suivante)', noDate, { goto: 'matches:todo', gotoLabel: 'Voir les matchs à jouer', lines: (m) => `${vs(m)} <span class="muted">· J${m.round}</span>` }),
     owing.length && card('💰 Paiements en attente', owing, { goto: 'pay', gotoLabel: 'Ouvrir les paiements', lines: (x) => `<a class="tlink" href="#/t/${esc(cur.slug)}/team/${x.id}">${esc(x.name)}</a> <span class="muted">· reste ${dt(x.rest)}</span>` }),
     f && unfollowed.length && card('🔕 Paires sans abonné dédié', unfollowed, { lines: (x) => teamLink(x.id) }),
@@ -603,6 +774,48 @@ function dashPanel() {
     ${todayMs.length ? card('🎾 Matchs d\'aujourd\'hui', todayMs, { lines: (m) => `${vs(m)} <span class="muted">· ${[m.time, m.court].filter(Boolean).join(' · ') || 'horaire à confirmer'}</span>` }) : ''}
     ${sections.length ? `<h2>À traiter</h2>${sections.join('')}` : '<div class="card" style="text-align:center">✅ Rien à traiter pour le moment.</div>'}
     ${cur.log?.length ? `<h2>Dernières modifications</h2>${cur.log.slice(0, 5).map((e) => `<div class="card" style="margin:6px 0;padding:10px 12px"><div class="muted">${esc(e.username)}</div><div>${esc(e.detail)}</div></div>`).join('')}<button class="ghost small" data-goto="log" style="color:inherit">Tout l'historique</button>` : ''}`;
+}
+// Gestion du tournoi (organisateurs) : réglages, messages à tous, édition suivante.
+function managePanel() {
+  const { tournament: t } = cur.data;
+  const n = cur.followers?.devices;
+  const item = (title, text, action) => `<div class="card"><strong>${title}</strong><p class="muted" style="margin:4px 0 12px">${text}</p>${action}</div>`;
+  const next = t.next
+    ? `<a class="tlink" href="#/t/${esc(t.next.slug)}"><strong>Ouvrir « ${esc(t.next.name)} » →</strong></a>`
+    : t.phase === 'setup' ? '<span class="muted">Disponible une fois le tournoi lancé.</span>' : '<button id="nextEd">Créer l\'édition suivante</button>';
+  return `
+    ${item('⚙ Réglages du tournoi', 'Nom, date, lieu, poules, qualifiés, points, frais d\'inscription et règlement.', '<button id="settings">Modifier les réglages</button>')}
+    ${item('📣 Notifier tout le monde', `Envoyer un message prédéfini à tous les abonnés du tournoi${n === undefined ? '' : ` (${n} appareil${n > 1 ? 's' : ''} aujourd'hui)`}. Les messages se configurent dans la fenêtre d'envoi.`, '<button id="broadcast">Choisir un message</button>')}
+    ${item('➡ Édition suivante', 'Crée un nouveau tournoi avec les mêmes réglages et les paires que vous choisissez. Les photos sont reprises.', next)}`;
+}
+// Prévisions : chances de chaque paire, calculées côté serveur par simulation (lib/forecast.js).
+async function loadForecast() {
+  const slug = cur.slug;
+  try { const fc = await api(`/api/t/${slug}/forecast`); if (cur && cur.slug === slug) { cur.fc = fc; cur.fcErr = null; } }
+  catch (e) { if (cur && cur.slug === slug) cur.fcErr = e.message; }
+}
+const pct = (v) => (v <= 0 ? '0%' : v >= 1 ? '100%' : v < 0.005 ? '<1%' : v > 0.995 ? '>99%' : `${Math.round(v * 100)}%`);
+function chancesPanel() {
+  const fc = cur.fc, { tournament: t } = cur.data;
+  if (!fc) return cur.fcErr ? `<div class="empty">Prévisions indisponibles : ${esc(cur.fcErr)}</div>` : '<div class="empty">Chargement des prévisions…</div>';
+  if (fc.status === 'setup') return '<div class="empty">Les prévisions apparaîtront une fois le championnat lancé et les premiers résultats saisis.</div>';
+  const ko = t.phase === 'knockout' || t.phase === 'finished';
+  const metrics = [['champion', 'Victoire finale'], ['podium', 'Podium'], ['final', 'Finale'], ...(ko ? [] : [['qualify', 'Qualification'], ['first', '1er de poule']])];
+  const m = metrics.some(([k]) => k === cur.fcMetric) ? cur.fcMetric : 'champion';
+  const rows = [...fc.teams].sort((a, b) => b[m] - a[m] || b.champion - a.champion || a.avgRank - b.avgRank);
+  const low = !ko && fc.groupsTotal && fc.groupsPlayed / fc.groupsTotal < 0.25;
+  const others = (x) => metrics.filter(([k]) => k !== m).map(([k, l]) => `${l} ${pct(x[k])}`).join(' · ');
+  return `
+    ${t.phase === 'finished' ? '<div class="card" style="text-align:center">🏆 Tournoi terminé : résultats définitifs.</div>' : `<div class="card"><strong>Qui va gagner ?</strong>
+      <p class="muted" style="margin:4px 0 0">Estimation par simulation de ${fc.sims.toLocaleString('fr-FR')} tournois, à partir des sets déjà joués et des matchs restants. Les chances bougent après chaque résultat.</p></div>`}
+    ${low ? `<div class="card" style="background:var(--tint)"><strong>Estimation peu fiable</strong><div class="muted">Seulement ${fc.groupsPlayed} match${fc.groupsPlayed > 1 ? 's' : ''} joué${fc.groupsPlayed > 1 ? 's' : ''} sur ${fc.groupsTotal} : les chances évolueront beaucoup.</div></div>` : ''}
+    <div class="chips">${metrics.map(([k, l]) => `<button data-fcm="${k}" aria-selected="${m === k}">${l}</button>`).join('')}</div>
+    ${rows.map((x, i) => `<div class="card" style="margin:8px 0">
+      <div class="row between" style="flex-wrap:nowrap"><div class="row" style="flex-wrap:nowrap;min-width:0"><span class="muted" style="width:1.4em">${i + 1}</span>${avatars(x.id, 30)}<strong style="min-width:0">${teamLink(x.id)}</strong></div>
+        <span class="pct">${pct(x[m])}</span></div>
+      <div class="bar" role="img" aria-label="${pct(x[m])}"><i style="width:${Math.max(x[m] * 100, x[m] > 0 ? 2 : 0)}%"></i></div>
+      <div class="muted" style="font-size:.8rem">${others(x)}</div></div>`).join('')}
+    <p class="muted">Méthode : le niveau de chaque paire est estimé sur ses sets gagnés et perdus (les forfaits sont ignorés), prudemment tant qu'il y a peu de matchs. Les matchs restants sont tirés au sort selon ces niveaux, puis le classement et le tableau final suivent les vraies règles du tournoi. C'est une estimation, pas une certitude.</p>`;
 }
 function logPanel() {
   if (!cur.log) return '<div class="empty">Chargement…</div>';
@@ -647,7 +860,9 @@ function infoPanel() {
 function bindPanel() {
   const { tournament: t } = cur.data;
   const p = $('#panel') || app;
+  p.querySelectorAll('[data-fcm]').forEach((b) => (b.onclick = () => { cur.fcMetric = b.dataset.fcm; renderTournament(); }));
   p.querySelectorAll('[data-goto]').forEach((b) => (b.onclick = () => { const [tab, filter] = b.dataset.goto.split(':'); cur.tab = tab; if (filter) cur.filter = filter; renderTournament(); }));
+  p.querySelectorAll('details[data-sect]').forEach((d) => (d.ontoggle = () => { (cur.secOpen ||= {})[d.dataset.sect] = d.open; }));
   p.querySelectorAll('[data-fteam]').forEach((el) => (el.onchange = () => { cur.fTeam = el.value; renderTournament(); }));
   p.querySelectorAll('[data-fround]').forEach((el) => (el.onchange = () => { cur.fRound = el.value; renderTournament(); }));
   p.querySelectorAll('[data-filter]').forEach((b) => (b.onclick = () => { cur.filter = b.dataset.filter; renderTournament(); }));
@@ -948,6 +1163,264 @@ function scoreDialog(m) {
   });
 }
 
+// --- Score keeper (page plein écran, téléphone sur support) ------------------------------
+// Les points sont envoyés au serveur à chaque tap (liste 1/2) ; le score affiché est recalculé en les rejouant (KeeperEngine).
+let keeper = null;
+const keeperKey = (token) => `keeper:${token}`;
+
+function keeperStop() {
+  document.body.classList.remove('keeping');
+  if (!keeper) return;
+  clearInterval(keeper.poll); clearTimeout(keeper.timer);
+  document.removeEventListener('visibilitychange', keeper.onVis);
+  keeper.wake?.release?.().catch(() => {});
+  remoteOff();
+  try { screen.orientation?.unlock?.(); } catch {}
+  keeper = null;
+}
+
+async function renderKeeper(token) {
+  const info = await api(`/api/live/${token}`);
+  let local = null;
+  try { local = JSON.parse(localStorage.getItem(keeperKey(token))); } catch {}
+  try { localStorage.setItem(`keeperMatch:${info.match.id}`, token); } catch {}
+  keeper = { token, info, points: info.points, status: info.status, dirty: false, seq: 0, last: 0, sync: 'ok', closed: null };
+  // Des points comptés hors connexion et pas encore envoyés priment sur la version du serveur.
+  if (local?.dirty && Array.isArray(local.points)) { keeper.points = local.points; keeper.dirty = true; }
+  document.body.classList.add('keeping');
+  try { keeper.stay = localStorage.getItem('keeperPortrait') === '1'; } catch {}
+  // Verrouillage en paysage : accepté seulement par certains navigateurs (Android, appli installée) ; sinon l'invite « Tournez le téléphone » s'affiche en portrait.
+  try { screen.orientation?.lock?.('landscape').catch(() => {}); } catch {}
+  keeperDraw();
+  if (keeper.dirty) keeperSync();
+  keeper.poll = setInterval(keeperPoll, 4000);
+  const wake = async () => { try { if (keeper && document.visibilityState === 'visible') keeper.wake = await navigator.wakeLock?.request('screen'); } catch {} };
+  keeper.onVis = wake;
+  document.addEventListener('visibilitychange', wake);
+  wake();
+}
+
+const SYNC_LABEL = { ok: '● Enregistré', busy: '● Envoi…', off: '● Hors ligne : les points sont gardés' };
+
+function keeperDraw() {
+  const k = keeper;
+  if (!k) return;
+  const { match } = k.info;
+  const names = [match.team1.name, match.team2.name];
+  if (k.closed) {
+    app.innerHTML = `<div class="keeper"><div class="kdone"><h2>${esc(k.closed)}</h2><a class="btn primary" href="#/t/${esc(k.info.slug)}">Retour au tournoi</a></div></div>`;
+    return;
+  }
+  const r = KeeperEngine.replay(k.points);
+  const labels = KeeperEngine.pointLabels(r);
+  const press = KeeperEngine.pressure(k.points);
+  const label = match.stage === 'group' ? `Journée ${match.round}` : 'Phase finale';
+  const state = r.winner ? '' : r.tb ? 'Tie-break' : r.decisive ? 'Point décisif' : '';
+  const ball = (i) => (press[i] ? `<span class="kball">Balle de ${press[i]}</span>` : '');
+  const row = (i) => `<div class="krow ${r.winner === i + 1 ? 'win' : ''}">
+      <span class="kn">${esc(names[i])}${ball(i)}</span>
+      ${r.sets.map((x) => `<span class="ks ${x[i] > x[1 - i] ? 'w' : ''}">${x[i]}</span>`).join('')}
+      <span class="ks cur">${r.winner ? '' : r.games[i]}</span>
+      <span class="kp">${r.winner ? r.won[i] : labels[i]}</span></div>`;
+  const setsText = r.sets.map((x) => x.join('-')).join(' ');
+  let bottom;
+  if (r.winner) {
+    const sent = k.status === 'submitted';
+    bottom = `<div class="kdone"><div class="ktrophy">🏆</div><h2>${esc(names[r.winner - 1])} gagne</h2><div class="kfinal">${esc(setsText)}</div>
+      ${sent ? '<p>Résultat envoyé ✓<br><span class="muted">Un organisateur doit le valider avant qu\'il compte au classement.</span></p>'
+             : '<button class="primary kbig" id="ksubmit">Envoyer le résultat</button>'}
+      <button class="ghost" id="kundo2">↶ Corriger : annuler le dernier point</button></div>`;
+  } else {
+    bottom = `<div class="kpads">
+      ${[0, 1].map((i) => `<button class="kpad p${i + 1}" data-w="${i + 1}" aria-label="Point pour ${esc(names[i])}"><span class="kname">${esc(names[i])}</span><span class="kplus">+1</span></button>`).join('')}</div>`;
+  }
+  app.innerHTML = `<div class="keeper ${k.stay ? 'stay' : ''}">
+    <div class="kbar">
+      <a class="kicon" href="#/t/${esc(k.info.slug)}" aria-label="Quitter le score keeper">←</a>
+      <div class="kmeta"><strong>${esc(label)}</strong>${match.court ? ` · ${esc(match.court)}` : ''}<div class="ksync ${k.sync}">${SYNC_LABEL[k.sync]}</div></div>
+      <button class="kicon" id="kundo" aria-label="Annuler le dernier point" ${k.points.length ? '' : 'disabled'}>↶</button>
+      <button class="kicon ${k.remote ? 'on' : ''}" id="kremote" aria-label="Télécommande (montre, bouton Bluetooth)" aria-pressed="${!!k.remote}">⌚</button>
+      <button class="kicon" id="kmenu" aria-label="Menu">⋯</button>
+    </div>
+    <div class="kboard">${row(0)}${row(1)}</div>
+    <div class="kstate">${state || '&nbsp;'}</div>
+    ${bottom}
+    <div class="krotate"><div class="kphone" aria-hidden="true">📱</div><h2>Tournez le téléphone en mode paysage</h2><p>Le score keeper se lit et se touche mieux à l'horizontale.</p><button class="ghost" id="kstay">Rester en portrait</button></div></div>`;
+  $('#kstay')?.addEventListener('click', () => { k.stay = true; try { localStorage.setItem('keeperPortrait', '1'); } catch {} keeperDraw(); });
+  app.querySelectorAll('[data-w]').forEach((b) => (b.onclick = () => keeperPoint(Number(b.dataset.w))));
+  $('#kundo')?.addEventListener('click', keeperUndo);
+  $('#kundo2')?.addEventListener('click', keeperUndo);
+  $('#kmenu')?.addEventListener('click', keeperMenu);
+  $('#kremote')?.addEventListener('click', remoteToggle);
+  remoteMeta();
+  $('#ksubmit')?.addEventListener('click', async () => {
+    try { await keeperSync(true); keeperDraw(); } catch (e) { toast(e.message); }
+  });
+}
+
+function keeperPoint(w) {
+  const k = keeper, now = Date.now();
+  if (!k || now - k.last < 300 || KeeperEngine.replay(k.points).winner) return; // double tap involontaire
+  k.last = now;
+  k.points.push(w);
+  navigator.vibrate?.(25);
+  keeperChanged();
+}
+
+// --- Télécommande : la montre ou un bouton Bluetooth envoie les touches média au téléphone ---
+// Piste suivante = point A, piste précédente = point B, lecture/pause = annuler. Un son silencieux en boucle
+// fait de la page un lecteur média, ce qui active ces touches même écran éteint.
+function silentWav(sec = 10, rate = 8000) {
+  const n = sec * rate, v = new DataView(new ArrayBuffer(44 + n));
+  const str = (o, t) => [...t].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  str(0, 'RIFF'); v.setUint32(4, 36 + n, true); str(8, 'WAVEfmt '); v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true); v.setUint32(28, rate, true);
+  v.setUint16(32, 1, true); v.setUint16(34, 8, true); str(36, 'data'); v.setUint32(40, n, true);
+  new Uint8Array(v.buffer, 44).fill(128);
+  return URL.createObjectURL(new Blob([v.buffer], { type: 'audio/wav' }));
+}
+function remoteToggle() {
+  const k = keeper;
+  if (!k) return;
+  if (k.remote) { remoteOff(); keeperDraw(); toast('Télécommande désactivée'); return; }
+  if (!('mediaSession' in navigator)) { toast('Télécommande non prise en charge par ce navigateur'); return; }
+  const audio = new Audio(silentWav());
+  audio.loop = true;
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  k.remote = { audio, ctx, url: audio.src };
+  const ms = navigator.mediaSession;
+  const undo = () => { remoteBeep([660, 440]); keeperUndo(); audio.play().catch(() => {}); };
+  ms.setActionHandler('nexttrack', () => remotePoint(1));
+  ms.setActionHandler('previoustrack', () => remotePoint(2));
+  ms.setActionHandler('play', undo);
+  ms.setActionHandler('pause', undo);
+  audio.play().then(() => { ms.playbackState = 'playing'; toast('Télécommande active : suivant = équipe 1, précédent = équipe 2, pause = annuler'); })
+    .catch(() => { remoteOff(); keeperDraw(); toast('Impossible de démarrer la télécommande'); });
+  keeperDraw();
+}
+function remoteOff() {
+  const r = keeper?.remote;
+  if (!r) return;
+  keeper.remote = null;
+  r.audio.pause(); r.ctx.close().catch(() => {}); URL.revokeObjectURL(r.url);
+  const ms = navigator.mediaSession;
+  for (const a of ['nexttrack', 'previoustrack', 'play', 'pause']) { try { ms.setActionHandler(a, null); } catch {} }
+  ms.metadata = null; ms.playbackState = 'none';
+}
+function remotePoint(w) {
+  const n = keeper?.points.length;
+  keeperPoint(w);
+  if (keeper && keeper.points.length > n) remoteBeep(w === 1 ? [880] : [523, 523]);
+}
+function remoteBeep(freqs) {
+  const ctx = keeper?.remote?.ctx;
+  if (!ctx) return;
+  ctx.resume?.();
+  freqs.forEach((f, i) => {
+    const o = ctx.createOscillator(), g = ctx.createGain(), t = ctx.currentTime + i * 0.22;
+    o.frequency.value = f; g.gain.setValueAtTime(0.4, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
+    o.connect(g).connect(ctx.destination); o.start(t); o.stop(t + 0.2);
+  });
+}
+// Le score s'affiche comme titre du « morceau » (écran de verrouillage, montre).
+function remoteMeta() {
+  if (!keeper?.remote) return;
+  const r = KeeperEngine.replay(keeper.points);
+  const [a, b] = KeeperEngine.pointLabels(r);
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: r.winner ? 'Match terminé' : `${a} - ${b}`,
+    artist: `Sets ${r.sets.map((x) => x.join('-')).join(' ') || '0-0'}${r.winner ? '' : ` · Jeux ${r.games.join('-')}`}`,
+    album: 'Score keeper',
+  });
+}
+
+function keeperUndo() {
+  if (!keeper?.points.length) return;
+  keeper.points.pop();
+  keeper.status = 'live';
+  keeperChanged();
+  toast('Point annulé');
+}
+
+function keeperChanged() {
+  const k = keeper;
+  k.dirty = true; k.seq++;
+  try { localStorage.setItem(keeperKey(k.token), JSON.stringify({ points: k.points, dirty: true })); } catch {}
+  keeperDraw();
+  clearTimeout(k.timer);
+  k.timer = setTimeout(() => keeperSync().catch(() => {}), 200);
+}
+
+// Envoie la liste des points au serveur ; en cas d'échec réseau, les points restent en local et on réessaie.
+async function keeperSync(submit = false) {
+  const k = keeper;
+  if (!k) return;
+  const seq = k.seq;
+  k.sync = 'busy'; keeperSyncLabel();
+  try {
+    const r = await api(`/api/live/${k.token}`, 'PUT', { points: k.points, ...(submit ? { submit: true } : {}) });
+    if (keeper !== k) return;
+    k.status = r.status;
+    if (k.seq === seq) { k.dirty = false; try { localStorage.removeItem(keeperKey(k.token)); } catch {} }
+    k.sync = 'ok'; keeperSyncLabel();
+  } catch (e) {
+    if (keeper !== k) return;
+    if (e.data?.error && /résultat|existe plus/.test(e.data.error)) { k.closed = e.message; keeperDraw(); return; }
+    k.sync = 'off'; keeperSyncLabel();
+    clearTimeout(k.timer);
+    k.timer = setTimeout(() => keeperSync().catch(() => {}), 5000);
+    if (submit) throw e;
+  }
+}
+
+function keeperSyncLabel() {
+  const el = $('.ksync');
+  if (!el || !keeper) return;
+  el.className = `ksync ${keeper.sync}`;
+  el.textContent = SYNC_LABEL[keeper.sync];
+}
+
+// Un autre téléphone peut compter le même match : on reprend sa version tant qu'on n'a rien d'en attente.
+async function keeperPoll() {
+  const k = keeper;
+  if (!k || k.dirty || k.closed || document.visibilityState !== 'visible') return;
+  try {
+    const info = await api(`/api/live/${k.token}`);
+    if (keeper !== k || k.dirty) return;
+    if (JSON.stringify(info.points) !== JSON.stringify(k.points) || info.status !== k.status) {
+      k.points = info.points; k.status = info.status; keeperDraw();
+    }
+  } catch (e) {
+    if (keeper === k && /existe plus/.test(e.message)) { k.closed = e.message; keeperDraw(); }
+  }
+}
+
+function keeperMenu() {
+  const k = keeper;
+  const code = k.info.code;
+  openDialog(`<h3>Score keeper</h3>
+    <p class="muted">Pour compter depuis un autre téléphone, donnez-lui ce code (valable jusqu'à la saisie du résultat).</p>
+    <input id="kurl" class="kcode" readonly value="${esc(fmtCode(code))}" onfocus="this.select()">
+    <div class="row" style="margin-top:8px">${navigator.share ? '<button value="share">Partager</button>' : ''}<button value="copy" class="primary">Copier le code</button></div>
+    <div class="row" style="margin-top:16px"><button value="reset" class="danger small">Recommencer à zéro</button><button value="close" class="danger small">Fermer le score keeper</button></div>
+    <div class="row" style="margin-top:16px;justify-content:flex-end"><button value="cancel" class="ghost">Retour</button></div>`,
+  async (f, action) => {
+    if (action === 'share') {
+      try { await navigator.share({ title: 'Score keeper', text: codeMessage(code) }); } catch {}
+    } else if (action === 'copy') {
+      await copyOrShare(codeMessage(code), 'copy', $('#kurl'), 'Code copié');
+    } else if (action === 'reset') {
+      if (!confirm('Remettre le score à zéro ?')) throw new Error('Annulé');
+      k.points = []; k.status = 'live'; keeperChanged();
+    } else if (action === 'close') {
+      if (!confirm('Fermer le score keeper ? Les points comptés seront perdus.')) throw new Error('Annulé');
+      await api(`/api/live/${k.token}`, 'DELETE');
+      try { localStorage.removeItem(keeperKey(k.token)); localStorage.removeItem(`keeperMatch:${k.info.match.id}`); } catch {}
+      location.hash = `#/t/${k.info.slug}`;
+    }
+  });
+}
+
 // --- Authentification ----------------------------------------------------------------
 function loginDialog() {
   openDialog(`<h3>Accès organisateur</h3>
@@ -1010,9 +1483,55 @@ async function accountDialog() {
   }));
 }
 
+// --- Invitation à installer l'appli (PWA) ---------------------------------------
+// Android / Chrome : le navigateur propose l'installation (beforeinstallprompt). iPhone : pas d'événement, on explique le geste.
+// Rien si l'appli est déjà installée (ouverte en mode « application »), et le message se retire 14 jours quand on le ferme.
+let installEvt = null;
+const isStandalone = () => !!(window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true;
+const isIos = () => /iphone|ipad|ipod/i.test(navigator.userAgent || '') || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const installDismissed = () => { try { return Date.now() - Number(localStorage.getItem('installDismissed') || 0) < 14 * 864e5; } catch { return false; } };
+
+function installBanner() {
+  const bar = $('#install');
+  if (!bar) return;
+  if (isStandalone() || installDismissed() || (!installEvt && !isIos())) { bar.hidden = true; return; }
+  bar.innerHTML = `
+    <svg width="34" height="34" viewBox="0 0 28 28" aria-hidden="true" style="flex:none"><circle cx="14" cy="14" r="13" fill="#0b2a5b"/><path d="M4 6c5 3 5 13 0 16M24 6c-5 3-5 13 0 16" stroke="#d4f04a" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+    <div class="grow"><strong>Installez Padel sur votre téléphone</strong><div style="font-size:.85rem">Accès direct depuis l'écran d'accueil et notifications des matchs.</div></div>
+    <button id="installGo" class="small">${installEvt ? 'Installer' : 'Comment ?'}</button>
+    <button id="installNo" class="ghost small" aria-label="Plus tard" style="color:inherit;padding:0 10px">✕</button>`;
+  bar.hidden = false;
+  $('#installGo').onclick = async () => {
+    if (installEvt) {
+      installEvt.prompt();
+      const r = await installEvt.userChoice.catch(() => null);
+      installEvt = null;
+      if (r && r.outcome === 'accepted') toast('Installation en cours…');
+      installBanner();
+    } else installHelp();
+  };
+  $('#installNo').onclick = () => { try { localStorage.setItem('installDismissed', String(Date.now())); } catch {} bar.hidden = true; };
+}
+function installHelp() {
+  const safari = !/crios|fxios|edgios|opios/i.test(navigator.userAgent || '');
+  openDialog(`<h3>Installer Padel sur iPhone</h3>
+    ${safari ? '' : '<p class="err" style="min-height:0">Ouvrez d\'abord ce site dans Safari : les autres navigateurs ne permettent pas l\'installation.</p>'}
+    <ol style="padding-left:1.2em;line-height:1.7">
+      <li>Touchez le bouton <strong>Partager</strong> (le carré avec une flèche) dans la barre de Safari.</li>
+      <li>Choisissez <strong>« Sur l'écran d'accueil »</strong>.</li>
+      <li>Touchez <strong>Ajouter</strong>, puis ouvrez Padel depuis sa nouvelle icône.</li>
+    </ol>
+    <p class="muted">Les notifications ne fonctionnent sur iPhone qu'une fois l'appli installée.</p>
+    <div class="row" style="margin-top:12px;justify-content:flex-end"><button value="cancel" class="primary">Compris</button></div>`, async () => {});
+}
+window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installEvt = e; installBanner(); });
+window.addEventListener('appinstalled', () => { installEvt = null; installBanner(); toast('Padel est installé'); });
+installBanner();
+
 $('#auth').addEventListener('click', () => (isAdmin() ? accountDialog() : loginDialog()));
 
 window.addEventListener('hashchange', render);
 setInterval(() => { if (cur && !dlg.open && !document.hidden) load().catch(() => {}); }, 20000);
+setInterval(() => { if (cur && cur.tab === 'live' && !cur.team && !dlg.open && !document.hidden) load().catch(() => {}); }, 5000);
 setToken(token);
 render();

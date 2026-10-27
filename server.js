@@ -7,6 +7,8 @@ const L = require('./lib/logic');
 const { buildIcs } = require('./lib/ics');
 const webpush = require('web-push');
 const N = require('./lib/notify');
+const { forecast } = require('./lib/forecast');
+const K = require('./public/keeper-engine');
 
 const PORT = process.env.PORT || 3000;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -168,6 +170,15 @@ CREATE TABLE IF NOT EXISTS push_subs (
 CREATE TABLE IF NOT EXISTS push_sent (key TEXT PRIMARY KEY, sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);`);
 
 db.exec(`
+CREATE TABLE IF NOT EXISTS live_scores (
+  match_id INTEGER PRIMARY KEY REFERENCES matches(id) ON DELETE CASCADE,
+  token TEXT NOT NULL UNIQUE,       -- lien secret du score keeper (jamais exposé dans l'état public)
+  points TEXT NOT NULL,             -- JSON : [1,2,1,...] paire qui marque chaque point ; le score est recalculé en rejouant
+  status TEXT NOT NULL DEFAULT 'live', -- 'live' | 'submitted' (résultat proposé, à valider par un organisateur)
+  updated_at INTEGER NOT NULL
+);`);
+
+db.exec(`
 CREATE TABLE IF NOT EXISTS player_photos (
   team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
   player INTEGER NOT NULL,          -- 1 ou 2
@@ -199,6 +210,7 @@ addCol('tournaments', 'legs', 'INTEGER NOT NULL DEFAULT 1');
 addCol('tournaments', 'third_place', 'INTEGER NOT NULL DEFAULT 1');
 addCol('tournaments', 'description', 'TEXT');
 addCol('tournaments', 'fee', 'INTEGER NOT NULL DEFAULT 150');
+addCol('live_scores', 'code', 'TEXT');
 addCol('tournaments', 'prev_id', 'INTEGER');
 addCol('teams', 'penalty', 'INTEGER NOT NULL DEFAULT 0');
 // Ancien format de nom automatique « A / B » → « A & B »
@@ -217,6 +229,13 @@ const q = {
 };
 const parseMatch = (m) => ({ ...m, sets: m.sets ? JSON.parse(m.sets) : null });
 const getMatches = (tid) => q.matches.all(tid).map(parseMatch);
+
+// --- Score keeper (comptage en direct) -----------------------------------------
+const LIVE_STALE_MS = 6 * 3600 * 1000;   // au-delà, un comptage sans nouveau point n'est plus affiché en direct
+const liveView = (l) => {
+  const r = K.replay(JSON.parse(l.points));
+  return { status: l.status, sets: r.sets, games: r.games, pts: K.pointLabels(r), tb: r.tb, winner: r.winner, points: r.used, updated_at: l.updated_at };
+};
 
 // --- Calcul de l'état complet d'un tournoi ----------------------------------
 function groupStandings(t, teams, matches) {
@@ -256,6 +275,12 @@ function fullState(t) {
     m.deadline = firstDate[`${m.grp}-${m.round + 1}`] || null;
     m.moves = moves[m.id] || [];
     m.late = t.phase === 'groups' ? L.lateState(m, today) : null;
+  }
+  const lives = db.prepare('SELECT l.match_id, l.points, l.status, l.updated_at FROM live_scores l JOIN matches m ON m.id = l.match_id WHERE m.tournament_id = ?').all(t.id);
+  for (const l of lives) {
+    const m = byId.get(l.match_id);
+    if (m.winner || (l.status === 'live' && Date.now() - l.updated_at > LIVE_STALE_MS)) continue;
+    m.live = liveView(l);
   }
   const changes = db.prepare('SELECT c.team_id, c.old_p1, c.old_p2, c.new_p1, c.new_p2, c.round, c.penalty, c.reason, c.created_at FROM partner_changes c JOIN teams x ON x.id = c.team_id WHERE x.tournament_id = ? ORDER BY c.id').all(t.id);
   const photos = db.prepare('SELECT f.team_id, f.player, f.v FROM player_photos f JOIN teams x ON x.id = f.team_id WHERE x.tournament_id = ?').all(t.id);
@@ -572,15 +597,40 @@ app.post('/api/t/:slug/push/test', wrap((req, res) => {
 
 app.get('/api/tournaments', wrap((req, res) => {
   const rows = db.prepare(`SELECT t.id, t.slug, t.name, t.date, t.location, t.phase,
-    (SELECT COUNT(*) FROM teams WHERE tournament_id = t.id) AS teams
+    (SELECT COUNT(*) FROM teams WHERE tournament_id = t.id) AS teams,
+    (SELECT COUNT(*) FROM matches WHERE tournament_id = t.id AND team1 IS NOT NULL AND team2 IS NOT NULL) AS matches,
+    (SELECT COUNT(*) FROM matches WHERE tournament_id = t.id AND team1 IS NOT NULL AND team2 IS NOT NULL AND winner IS NOT NULL) AS played
     FROM tournaments t ORDER BY COALESCE(t.date, t.created_at) DESC, t.id DESC`).all();
+  const nextMatch = db.prepare(`SELECT m.date, m.time, a.name AS t1, b.name AS t2 FROM matches m
+    JOIN teams a ON a.id = m.team1 JOIN teams b ON b.id = m.team2
+    WHERE m.tournament_id = ? AND m.winner IS NULL AND m.date >= ? ORDER BY m.date, m.time LIMIT 1`);
+  const today = todayTn();
   // « Terminé » se déduit de la finale jouée : on ne le calcule que pour les tournois en phase finale
-  res.json(rows.map(({ id, ...r }) => (r.phase === 'knockout' ? { ...r, phase: fullState(q.tournament.get(id)).tournament.phase } : r)));
+  res.json(rows.map(({ id, ...r }) => {
+    const phase = r.phase === 'knockout' ? fullState(q.tournament.get(id)).tournament.phase : r.phase;
+    return { ...r, phase, next: phase === 'groups' || phase === 'knockout' ? nextMatch.get(id, today) || null : null };
+  }));
 }));
 app.get('/api/t/:slug', wrap((req, res) => {
   const t = q.bySlug.get(req.params.slug);
   if (!t) throw fail(404, 'Tournoi introuvable');
   res.json(fullState(t));
+}));
+
+// Prévisions (organisateurs pour le moment) : probabilités par simulation, recalculées seulement quand les résultats changent.
+const forecastCache = new Map();
+app.get('/api/t/:slug/forecast', admin, wrap((req, res) => {
+  const t = q.bySlug.get(req.params.slug);
+  if (!t) throw fail(404, 'Tournoi introuvable');
+  const teams = q.teams.all(t.id), matches = getMatches(t.id);
+  const sig = crypto.createHash('md5').update(JSON.stringify([t.phase, t.qualifiers, t.groups_count, t.win_pts, t.loss_pts, t.third_place,
+    teams.map((x) => [x.id, x.grp, x.penalty]), matches.map((m) => [m.id, m.team1, m.team2, m.winner, m.sets, m.forfeit])])).digest('hex');
+  const hit = forecastCache.get(t.id);
+  if (hit && hit.sig === sig) return res.json(hit.data);
+  const data = forecast({ tournament: t, teams, matches });
+  forecastCache.set(t.id, { sig, data });
+  if (forecastCache.size > 50) forecastCache.delete(forecastCache.keys().next().value);
+  res.json(data);
 }));
 
 // Historique des modifications (organisateurs uniquement)
@@ -830,17 +880,7 @@ app.post('/api/tournaments/:id/knockout', admin, wrap((req, res) => {
   const matches = getMatches(t.id);
   if (matches.some((m) => m.stage === 'group' && !m.winner)) throw fail(400, 'Tous les matchs de poule doivent être terminés');
   const st = groupStandings(t, teams, matches);
-  // Têtes de série : rang dans la poule, puis points, diff. sets, diff. jeux
-  const pool = st.flatMap((g) => g.rows.filter((r) => r.rank <= t.qualifiers));
-  const perf = (a, b) => b.points - a.points ||
-    (b.setsFor - b.setsAgainst) - (a.setsFor - a.setsAgainst) ||
-    (b.gamesFor - b.gamesAgainst) - (a.gamesFor - a.gamesAgainst);
-  const teamGroup = new Map(teams.map((x) => [x.id, x.grp]));
-  const winnersOrder = pool.filter((r) => r.rank === 1).sort(perf).map((r) => teamGroup.get(r.id));
-  // Les rangs suivants gardent l'ordre des groupes des premiers : évite les chocs entre équipes d'une même poule au 1er tour.
-  pool.sort((a, b) => a.rank - b.rank ||
-    (a.rank === 1 ? perf(a, b) : winnersOrder.indexOf(teamGroup.get(a.id)) - winnersOrder.indexOf(teamGroup.get(b.id))));
-  const seeds = pool.map((r) => r.id);
+  const seeds = L.knockoutSeeds(st, new Map(teams.map((x) => [x.id, x.grp])), t.qualifiers);
   if (seeds.length < 2) throw fail(400, 'Au moins 2 qualifiés nécessaires');
   const { rounds } = L.buildBracket(seeds, !!t.third_place);
   const ins = db.prepare('INSERT INTO matches (tournament_id, stage, round, pos, team1, team2) VALUES (?, ?, ?, ?, ?, ?)');
@@ -858,6 +898,96 @@ app.post('/api/tournaments/:id/knockout', admin, wrap((req, res) => {
   })();
   audit(req, t.id, 'Tableau des play-offs généré');
   notify(t.id, null, 'Les play-offs sont lancés : le tableau est disponible.');
+  res.json({ ok: true });
+}));
+
+// Score keeper : un appareil compte les points en direct avec un lien secret propre au match.
+// Le résultat n'entre dans le classement qu'après validation par un organisateur (PUT /api/matches/:id habituel).
+// Code court à saisir par les joueurs à la place du lien : 6 caractères sans ambiguïté (ni 0/O ni 1/I/L), affiché « ABC-DEF ».
+const CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+const newLiveCode = () => {
+  for (;;) {
+    let c = '';
+    for (const b of crypto.randomBytes(6)) c += CODE_CHARS[b % CODE_CHARS.length];
+    if (!db.prepare('SELECT 1 FROM live_scores WHERE code = ?').get(c)) return c;
+  }
+};
+const normCode = (v) => String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
+for (const r of db.prepare('SELECT match_id FROM live_scores WHERE code IS NULL').all()) db.prepare('UPDATE live_scores SET code = ? WHERE match_id = ?').run(newLiveCode(), r.match_id);
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS live_scores_code ON live_scores(code)');
+const liveByToken = db.prepare('SELECT * FROM live_scores WHERE token = ?');
+const liveByMatch = db.prepare('SELECT * FROM live_scores WHERE match_id = ?');
+
+// Organisateurs seulement : crée le comptage d'un match, ou renvoie le lien existant (à partager aux joueurs).
+app.post('/api/matches/:id/live', admin, wrap((req, res) => {
+  const m = q.match.get(req.params.id);
+  if (!m) throw fail(404, 'Match introuvable');
+  const t = loadT(m.tournament_id);
+  if (!m.team1 || !m.team2) throw fail(400, 'Les deux équipes ne sont pas encore connues');
+  if (m.winner) throw fail(409, 'Ce match a déjà un résultat');
+  if (m.stage === 'group' && t.phase !== 'groups') throw fail(409, 'Les poules sont closes');
+  const old = liveByMatch.get(m.id);
+  if (old) return res.json({ token: old.token, code: old.code });
+  const token = crypto.randomBytes(16).toString('hex'), code = newLiveCode();
+  db.prepare('INSERT INTO live_scores (match_id, token, code, points, status, updated_at) VALUES (?, ?, ?, \'[]\', \'live\', ?)').run(m.id, token, code, Date.now());
+  res.json({ token, code });
+}));
+
+// Public : un joueur saisit le code reçu d'un organisateur et obtient l'accès au comptage (même limite d'essais que la connexion).
+const codeAttempts = new Map();
+app.post('/api/live-code', wrap((req, res) => {
+  const ip = req.ip;
+  const a = codeAttempts.get(ip) || { n: 0, t: Date.now() };
+  if (Date.now() - a.t > 15 * 60e3) { a.n = 0; a.t = Date.now(); }
+  if (a.n >= 15) throw fail(429, 'Trop d\'essais, réessayez dans quelques minutes');
+  const l = db.prepare('SELECT token FROM live_scores WHERE code = ?').get(normCode(req.body.code));
+  if (!l) { codeAttempts.set(ip, { ...a, n: a.n + 1 }); throw fail(404, 'Code inconnu, ou score keeper déjà fermé'); }
+  res.json({ token: l.token });
+}));
+
+app.get('/api/live/:token', wrap((req, res) => {
+  const l = liveByToken.get(req.params.token);
+  if (!l) throw fail(404, 'Ce score keeper n\'existe plus (résultat saisi, fermé ou remplacé).');
+  const m = q.match.get(l.match_id);
+  const t = loadT(m.tournament_id);
+  const team = (id) => db.prepare('SELECT id, name FROM teams WHERE id = ?').get(id);
+  res.json({
+    slug: t.slug, tournament: t.name,
+    match: { id: m.id, stage: m.stage, round: m.round, grp: m.grp, court: m.court, time: m.time, date: m.date, team1: team(m.team1), team2: team(m.team2) },
+    points: JSON.parse(l.points), status: l.status, updated_at: l.updated_at, code: l.code,
+  });
+}));
+
+app.put('/api/live/:token', wrap((req, res) => {
+  const l = liveByToken.get(req.params.token);
+  if (!l) throw fail(404, 'Ce score keeper n\'existe plus (résultat saisi, fermé ou remplacé).');
+  const m = q.match.get(l.match_id);
+  if (m.winner) throw fail(409, 'Un résultat a déjà été saisi pour ce match');
+  const pts = req.body.points;
+  if (!Array.isArray(pts) || pts.length > 600 || !pts.every((x) => x === 1 || x === 2)) throw fail(400, 'Points invalides');
+  const r = K.replay(pts);
+  const points = pts.slice(0, r.used);
+  let status = 'live';
+  if (req.body.submit) {
+    if (!r.winner) throw fail(400, 'Le match n\'est pas terminé');
+    status = 'submitted';
+  }
+  db.prepare('UPDATE live_scores SET points = ?, status = ?, updated_at = ? WHERE match_id = ?').run(JSON.stringify(points), status, Date.now(), m.id);
+  res.json({ ok: true, points, status, winner: r.winner });
+}));
+
+app.delete('/api/live/:token', wrap((req, res) => {
+  db.prepare('DELETE FROM live_scores WHERE token = ?').run(req.params.token);
+  res.json({ ok: true });
+}));
+
+// Organisateurs : fermer ou rejeter un comptage (libère le match).
+app.delete('/api/matches/:id/live', admin, wrap((req, res) => {
+  const m = q.match.get(req.params.id);
+  if (!m) throw fail(404, 'Match introuvable');
+  const l = liveByMatch.get(m.id);
+  db.prepare('DELETE FROM live_scores WHERE match_id = ?').run(m.id);
+  if (l) audit(req, m.tournament_id, `Score keeper fermé : ${teamLabel(m.team1)} vs ${teamLabel(m.team2)}${l.status === 'submitted' ? ' (résultat proposé rejeté)' : ''}`);
   res.json({ ok: true });
 }));
 
@@ -892,6 +1022,7 @@ app.put('/api/matches/:id', admin, wrap((req, res) => {
       winner = L.matchResult(sets).winner === 1 ? m.team1 : m.team2;
     }
     setMatch.run(m.team1, m.team2, sets ? JSON.stringify(sets) : null, winner, forfeit, m.id);
+    db.prepare('DELETE FROM live_scores WHERE match_id = ?').run(m.id);
     if (m.stage === 'ko') propagate({ ...m, winner });
     newResult = resultText(sets, forfeit, winner);
     if (sets || winner === -1) scored = { winner, sets, forfeit };
@@ -921,7 +1052,7 @@ app.post('/api/tournaments/:id/apply-forfeits', admin, wrap((req, res) => {
   const t = loadT(req.params.id);
   if (t.phase !== 'groups') throw fail(409, 'Les poules ne sont pas en cours');
   const due = fullState(t).matches.filter((m) => m.late === 'forfeit');
-  db.transaction(() => { for (const m of due) setMatch.run(m.team1, m.team2, null, -1, 'both', m.id); })();
+  db.transaction(() => { for (const m of due) { setMatch.run(m.team1, m.team2, null, -1, 'both', m.id); db.prepare('DELETE FROM live_scores WHERE match_id = ?').run(m.id); } })();
   audit(req, t.id, `Double forfait appliqué à ${due.length} match(s) en retard : ${due.map((m) => `${teamLabel(m.team1)} vs ${teamLabel(m.team2)}`).join(', ') || '—'}`);
   for (const m of due) notify(t.id, [m.team1, m.team2], `Double forfait appliqué : ${teamLabel(m.team1)} vs ${teamLabel(m.team2)} (non joué dans les délais, 6-0 / 6-0 pour les deux paires).`);
   res.json({ ok: true, count: due.length });
