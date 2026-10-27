@@ -1174,6 +1174,7 @@ function keeperStop() {
   clearInterval(keeper.poll); clearTimeout(keeper.timer);
   document.removeEventListener('visibilitychange', keeper.onVis);
   keeper.wake?.release?.().catch(() => {});
+  remoteOff();
   try { screen.orientation?.unlock?.(); } catch {}
   keeper = null;
 }
@@ -1238,6 +1239,7 @@ function keeperDraw() {
       <a class="kicon" href="#/t/${esc(k.info.slug)}" aria-label="Quitter le score keeper">←</a>
       <div class="kmeta"><strong>${esc(label)}</strong>${match.court ? ` · ${esc(match.court)}` : ''}<div class="ksync ${k.sync}">${SYNC_LABEL[k.sync]}</div></div>
       <button class="kicon" id="kundo" aria-label="Annuler le dernier point" ${k.points.length ? '' : 'disabled'}>↶</button>
+      <button class="kicon ${k.remote ? 'on' : ''}" id="kremote" aria-label="Télécommande (montre, bouton Bluetooth)" aria-pressed="${!!k.remote}">⌚</button>
       <button class="kicon" id="kmenu" aria-label="Menu">⋯</button>
     </div>
     <div class="kboard">${row(0)}${row(1)}</div>
@@ -1249,6 +1251,8 @@ function keeperDraw() {
   $('#kundo')?.addEventListener('click', keeperUndo);
   $('#kundo2')?.addEventListener('click', keeperUndo);
   $('#kmenu')?.addEventListener('click', keeperMenu);
+  $('#kremote')?.addEventListener('click', remoteToggle);
+  remoteMeta();
   $('#ksubmit')?.addEventListener('click', async () => {
     try { await keeperSync(true); keeperDraw(); } catch (e) { toast(e.message); }
   });
@@ -1261,6 +1265,73 @@ function keeperPoint(w) {
   k.points.push(w);
   navigator.vibrate?.(25);
   keeperChanged();
+}
+
+// --- Télécommande : la montre ou un bouton Bluetooth envoie les touches média au téléphone ---
+// Piste suivante = point A, piste précédente = point B, lecture/pause = annuler. Un son silencieux en boucle
+// fait de la page un lecteur média, ce qui active ces touches même écran éteint.
+function silentWav(sec = 10, rate = 8000) {
+  const n = sec * rate, v = new DataView(new ArrayBuffer(44 + n));
+  const str = (o, t) => [...t].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  str(0, 'RIFF'); v.setUint32(4, 36 + n, true); str(8, 'WAVEfmt '); v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true); v.setUint32(28, rate, true);
+  v.setUint16(32, 1, true); v.setUint16(34, 8, true); str(36, 'data'); v.setUint32(40, n, true);
+  new Uint8Array(v.buffer, 44).fill(128);
+  return URL.createObjectURL(new Blob([v.buffer], { type: 'audio/wav' }));
+}
+function remoteToggle() {
+  const k = keeper;
+  if (!k) return;
+  if (k.remote) { remoteOff(); keeperDraw(); toast('Télécommande désactivée'); return; }
+  if (!('mediaSession' in navigator)) { toast('Télécommande non prise en charge par ce navigateur'); return; }
+  const audio = new Audio(silentWav());
+  audio.loop = true;
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  k.remote = { audio, ctx, url: audio.src };
+  const ms = navigator.mediaSession;
+  const undo = () => { remoteBeep([660, 440]); keeperUndo(); audio.play().catch(() => {}); };
+  ms.setActionHandler('nexttrack', () => remotePoint(1));
+  ms.setActionHandler('previoustrack', () => remotePoint(2));
+  ms.setActionHandler('play', undo);
+  ms.setActionHandler('pause', undo);
+  audio.play().then(() => { ms.playbackState = 'playing'; toast('Télécommande active : suivant = équipe 1, précédent = équipe 2, pause = annuler'); })
+    .catch(() => { remoteOff(); keeperDraw(); toast('Impossible de démarrer la télécommande'); });
+  keeperDraw();
+}
+function remoteOff() {
+  const r = keeper?.remote;
+  if (!r) return;
+  keeper.remote = null;
+  r.audio.pause(); r.ctx.close().catch(() => {}); URL.revokeObjectURL(r.url);
+  const ms = navigator.mediaSession;
+  for (const a of ['nexttrack', 'previoustrack', 'play', 'pause']) { try { ms.setActionHandler(a, null); } catch {} }
+  ms.metadata = null; ms.playbackState = 'none';
+}
+function remotePoint(w) {
+  const n = keeper?.points.length;
+  keeperPoint(w);
+  if (keeper && keeper.points.length > n) remoteBeep(w === 1 ? [880] : [523, 523]);
+}
+function remoteBeep(freqs) {
+  const ctx = keeper?.remote?.ctx;
+  if (!ctx) return;
+  ctx.resume?.();
+  freqs.forEach((f, i) => {
+    const o = ctx.createOscillator(), g = ctx.createGain(), t = ctx.currentTime + i * 0.22;
+    o.frequency.value = f; g.gain.setValueAtTime(0.4, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
+    o.connect(g).connect(ctx.destination); o.start(t); o.stop(t + 0.2);
+  });
+}
+// Le score s'affiche comme titre du « morceau » (écran de verrouillage, montre).
+function remoteMeta() {
+  if (!keeper?.remote) return;
+  const r = KeeperEngine.replay(keeper.points);
+  const [a, b] = KeeperEngine.pointLabels(r);
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: r.winner ? 'Match terminé' : `${a} - ${b}`,
+    artist: `Sets ${r.sets.map((x) => x.join('-')).join(' ') || '0-0'}${r.winner ? '' : ` · Jeux ${r.games.join('-')}`}`,
+    album: 'Score keeper',
+  });
 }
 
 function keeperUndo() {

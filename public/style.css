@@ -193,6 +193,7 @@ body.keeping main { max-width: none; padding: 0; }
 .ksync { font-size: .75rem; opacity: .85; }
 .ksync.off { color: var(--accent); font-weight: 700; opacity: 1; }
 .kicon { display: inline-flex; align-items: center; justify-content: center; width: 52px; height: 52px; min-height: 0; padding: 0; border-radius: 50%; background: rgba(255, 255, 255, .18); color: #fff; font-size: 1.6rem; text-decoration: none; line-height: 1; }
+.kicon.on { background: var(--accent); color: #0b2a5b; }
 .kboard { background: rgba(0, 0, 0, .28); border-radius: 18px; padding: 6px 14px; }
 .krow { display: flex; align-items: center; gap: 12px; padding: 6px 0; font-variant-numeric: tabular-nums; }
 .krow + .krow { border-top: 1px solid rgba(255, 255, 255, .2); }
