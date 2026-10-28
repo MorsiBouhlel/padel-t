@@ -41,8 +41,8 @@ details.sect[open] > summary h2::before { transform: rotate(90deg); }
 /* En-tête de page : terrain vu de dessus */
 .hero { position: relative; margin: -16px -16px 0; padding: 0 20px 14px; background: var(--brand) var(--court) right -60px center / auto 130% no-repeat; color: #fff; border-radius: 0 0 24px 24px; }
 .hero.tall { padding-bottom: 56px; }
-.tlogo { display: block; max-width: 120px; max-height: 72px; object-fit: contain; margin: 4px 0 8px; }
-.tlogo-s { width: auto; height: var(--s, 28px); max-width: calc(var(--s, 28px) * 2); object-fit: contain; vertical-align: middle; margin-right: 8px; }
+.tlogo { display: block; width: 88px; height: 88px; border-radius: 50%; object-fit: cover; margin: 4px 0 8px; }
+.tlogo-s { width: var(--s, 28px); height: var(--s, 28px); border-radius: 50%; object-fit: cover; vertical-align: middle; margin-right: 8px; }
 .hero h1 { color: #fff; font-weight: 800; font-size: 1.5rem; line-height: 1.15; letter-spacing: -.5px; margin: 0 0 4px; }
 .hero .muted, .hero a.back { color: #dce9fb; }
 .hero a.back { display: inline-flex; align-items: center; min-height: 40px; text-decoration: none; font-weight: 500; }
