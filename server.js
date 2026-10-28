@@ -188,6 +188,13 @@ CREATE TABLE IF NOT EXISTS player_photos (
 );`);
 
 db.exec(`
+CREATE TABLE IF NOT EXISTS tournament_logos (
+  tournament_id INTEGER PRIMARY KEY REFERENCES tournaments(id) ON DELETE CASCADE,
+  data BLOB NOT NULL,               -- PNG réduit côté navigateur (transparence conservée)
+  v INTEGER NOT NULL                -- version : change à chaque remplacement (cache navigateur)
+);`);
+
+db.exec(`
 CREATE TABLE IF NOT EXISTS broadcast_templates (
   id INTEGER PRIMARY KEY, label TEXT NOT NULL, text TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0
 );
@@ -294,6 +301,7 @@ function fullState(t) {
   return {
     tournament: {
       ...t, phase,
+      logo: (db.prepare('SELECT v FROM tournament_logos WHERE tournament_id = ?').get(t.id) || {}).v || null,
       prev: (t.prev_id && db.prepare('SELECT slug, name FROM tournaments WHERE id = ?').get(t.prev_id)) || null,
       next: db.prepare('SELECT slug, name FROM tournaments WHERE prev_id = ? ORDER BY id LIMIT 1').get(t.id) || null,
     },
@@ -597,6 +605,7 @@ app.post('/api/t/:slug/push/test', wrap((req, res) => {
 
 app.get('/api/tournaments', wrap((req, res) => {
   const rows = db.prepare(`SELECT t.id, t.slug, t.name, t.date, t.location, t.phase,
+    (SELECT v FROM tournament_logos WHERE tournament_id = t.id) AS logo,
     (SELECT COUNT(*) FROM teams WHERE tournament_id = t.id) AS teams,
     (SELECT COUNT(*) FROM matches WHERE tournament_id = t.id AND team1 IS NOT NULL AND team2 IS NOT NULL) AS matches,
     (SELECT COUNT(*) FROM matches WHERE tournament_id = t.id AND team1 IS NOT NULL AND team2 IS NOT NULL AND winner IS NOT NULL) AS played
@@ -606,7 +615,8 @@ app.get('/api/tournaments', wrap((req, res) => {
     WHERE m.tournament_id = ? AND m.winner IS NULL AND m.date >= ? ORDER BY m.date, m.time LIMIT 1`);
   const today = todayTn();
   // « Terminé » se déduit de la finale jouée : on ne le calcule que pour les tournois en phase finale
-  res.json(rows.map(({ id, ...r }) => {
+  res.json(rows.map((r) => {
+    const id = r.id;
     const phase = r.phase === 'knockout' ? fullState(q.tournament.get(id)).tournament.phase : r.phase;
     return { ...r, phase, next: phase === 'groups' || phase === 'knockout' ? nextMatch.get(id, today) || null : null };
   }));
@@ -747,6 +757,27 @@ app.put('/api/teams/:id', admin, wrap((req, res) => {
   res.json({ ok: true });
 }));
 
+// Logo du tournoi : lecture publique, envoi réservé aux organisateurs (PNG déjà réduit par le navigateur)
+app.get('/api/logos/:tid', wrap((req, res) => {
+  const r = db.prepare('SELECT data FROM tournament_logos WHERE tournament_id = ?').get(Number(req.params.tid));
+  if (!r) throw fail(404, 'Pas de logo');
+  res.set({ 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=31536000, immutable', 'X-Content-Type-Options': 'nosniff' }).send(r.data);
+}));
+app.put('/api/tournaments/:id/logo', admin, express.raw({ type: 'image/png', limit: '400kb' }), wrap((req, res) => {
+  const t = loadT(req.params.id);
+  const b = req.body;
+  if (!Buffer.isBuffer(b) || b.length < 60 || b.readUInt32BE(0) !== 0x89504e47) throw fail(400, 'Logo PNG requis (400 Ko maximum)');
+  db.prepare('INSERT INTO tournament_logos (tournament_id, data, v) VALUES (?, ?, ?) ON CONFLICT (tournament_id) DO UPDATE SET data = excluded.data, v = excluded.v')
+    .run(t.id, b, Date.now());
+  audit(req, t.id, 'Logo du tournoi enregistré');
+  res.json({ ok: true });
+}));
+app.delete('/api/tournaments/:id/logo', admin, wrap((req, res) => {
+  const t = loadT(req.params.id);
+  if (db.prepare('DELETE FROM tournament_logos WHERE tournament_id = ?').run(t.id).changes) audit(req, t.id, 'Logo du tournoi retiré');
+  res.json({ ok: true });
+}));
+
 // Changement de partenaire : autorisé pendant les poules uniquement ; pénalité de 2 points à partir de la journée 4.
 // Photos des joueurs : lecture publique, envoi réservé aux organisateurs (JPEG déjà réduit par le navigateur)
 app.get('/api/photos/:teamId/:n', wrap((req, res) => {
@@ -828,6 +859,7 @@ app.post('/api/tournaments/:id/next-edition', admin, wrap((req, res) => {
     const info = db.prepare(`INSERT INTO tournaments (slug, name, date, location, groups_count, qualifiers, win_pts, loss_pts, fee, legs, third_place, description, prev_id)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(slug, name, isDate(req.body.date) ? req.body.date : null, t.location, t.groups_count, t.qualifiers,
       t.win_pts, t.loss_pts, t.fee, t.legs, t.third_place, t.description, t.id);
+    db.prepare('INSERT INTO tournament_logos (tournament_id, data, v) SELECT ?, data, v FROM tournament_logos WHERE tournament_id = ?').run(info.lastInsertRowid, t.id);
     const ins = db.prepare('INSERT INTO teams (tournament_id, name, p1, p2) VALUES (?, ?, ?, ?)');
     const copyPhotos = db.prepare('INSERT INTO player_photos (team_id, player, data, v) SELECT ?, player, data, v FROM player_photos WHERE team_id = ?');
     teams.forEach((x) => copyPhotos.run(ins.run(info.lastInsertRowid, x.name, x.p1, x.p2).lastInsertRowid, x.id));

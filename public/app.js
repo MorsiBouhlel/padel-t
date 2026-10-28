@@ -98,7 +98,7 @@ async function load() {
   cur.log = isAdmin() ? await api(`/api/tournaments/${cur.data.tournament.id}/audit`).catch(() => []) : null;
   cur.followers = isAdmin() ? await api(`/api/tournaments/${cur.data.tournament.id}/followers`).catch(() => null) : null;
   if (!cur.tab) cur.tab = { setup: isAdmin() ? 'teams' : 'info', groups: 'groups' }[cur.data.tournament.phase] || 'bracket';
-  if (isAdmin() && (cur.tab === 'chances' || cur.team)) await loadForecast();
+  if (isAdmin() && (FC_TABS.includes(cur.tab) || cur.team)) await loadForecast();
   renderTournament();
 }
 
@@ -113,7 +113,7 @@ async function renderHome() {
     const pct = t.matches ? Math.round((t.played / t.matches) * 100) : 0;
     return `<a class="card tcard" href="#/t/${esc(t.slug)}">
       <div class="row between"><span class="badge live">EN COURS</span><span class="muted">${PHASES[t.phase]}</span></div>
-      <h2>${esc(t.name)}</h2><div class="muted">${meta(t)}</div>
+      <h2>${logo(t, 36)}${esc(t.name)}</h2><div class="muted">${meta(t)}</div>
       ${t.matches ? `<div class="row between" style="margin-top:14px"><strong>${t.played} match${t.played > 1 ? 's' : ''} joué${t.played > 1 ? 's' : ''}</strong><span class="muted">sur ${t.matches}</span></div><div class="bar"><i style="width:${pct}%"></i></div>` : ''}
       ${t.next ? `<div class="next"><div class="datechip"><b>${d.getDate()}</b><span>${esc(d.toLocaleDateString('fr-FR', { month: 'short' }))}</span></div>
         <div class="grow"><div class="muted">Prochain match${t.next.time ? ` · ${esc(t.next.time)}` : ''}</div><strong>${esc(t.next.t1)} – ${esc(t.next.t2)}</strong></div></div>` : ''}
@@ -121,7 +121,7 @@ async function renderHome() {
   };
   const simple = (t) => `
       <a class="card" href="#/t/${esc(t.slug)}">
-        <div class="row between"><strong>${esc(t.name)}</strong><span class="badge">${PHASES[t.phase]}</span></div>
+        <div class="row between"><strong>${logo(t, 28)}${esc(t.name)}</strong><span class="badge">${PHASES[t.phase]}</span></div>
         <div class="muted">${meta(t)}</div>
       </a>`;
   const running = list.filter((t) => t.phase === 'groups' || t.phase === 'knockout');
@@ -132,6 +132,24 @@ async function renderHome() {
     ${isAdmin() ? '' : codeEntry()}
     ${list.length ? running.map(live).join('') + others.map(simple).join('') + (archived.length ? `<h2>Archives</h2>${archived.map(simple).join('')}` : '') : '<div class="empty">Aucun tournoi pour le moment.</div>'}`;
   $('#new')?.addEventListener('click', () => tournamentDialog());
+}
+
+function logoControls(t) {
+  return `${t.logo ? `<img class="tlogo-s" style="--s:56px" src="/api/logos/${t.id}?v=${t.logo}" alt="">` : ''}
+    <label class="ghost small btnlike">${t.logo ? 'Changer' : 'Ajouter un logo'}<input type="file" accept="image/*" hidden></label>
+    ${t.logo ? '<button type="button" class="ghost small" data-rm style="color:inherit">Retirer</button>' : ''}`;
+}
+function bindLogo(t) {
+  const box = $('#logobox');
+  if (!box) return;
+  const refresh = async () => { cur.data = await api(`/api/t/${cur.slug}`); t.logo = cur.data.tournament.logo; box.innerHTML = logoControls(t); bindLogo(t); };
+  const file = box.querySelector('input[type=file]');
+  file.onchange = async () => {
+    if (!file.files[0]) return;
+    try { await uploadLogo(t.id, file.files[0]); await refresh(); toast('Logo enregistré'); } catch (e) { $('#derr').textContent = e.message; }
+  };
+  const rm = box.querySelector('[data-rm]');
+  if (rm) rm.onclick = async () => { try { await api(`/api/tournaments/${t.id}/logo`, 'DELETE'); await refresh(); } catch (e) { $('#derr').textContent = e.message; } };
 }
 
 async function tournamentDialog(t) {
@@ -151,6 +169,7 @@ async function tournamentDialog(t) {
     <div><label>Match pour la 3e place</label><select name="third_place" ${!t || ['setup', 'groups'].includes(t.phase) ? '' : 'disabled'}><option value="1" ${t?.third_place !== 0 ? 'selected' : ''}>Oui</option><option value="0" ${t?.third_place === 0 ? 'selected' : ''}>Non</option></select></div></div>
     <label>Frais de participation par joueur (DT)</label><input type="number" inputmode="numeric" name="fee" min="0" max="100000" value="${t?.fee ?? 150}">
     <label>Description / règlement</label><textarea name="description" rows="6" maxlength="8000">${esc(description)}</textarea>
+    ${t ? `<label>Logo du tournoi (facultatif)</label><div id="logobox" class="row" style="gap:12px">${logoControls(t)}</div>` : ''}
     <div class="row between" style="margin-top:16px">
       ${t ? '<button value="delete" class="danger small">Supprimer</button>' : '<span></span>'}
       <span class="row"><button value="cancel" class="ghost">Annuler</button><button value="save" class="primary">Enregistrer</button></span>
@@ -164,6 +183,7 @@ async function tournamentDialog(t) {
     if (t) { await api(`/api/tournaments/${t.id}`, 'PUT', f); await load(); toast('Réglages enregistrés'); }
     else { const r = await api('/api/tournaments', 'POST', f); location.hash = `#/t/${r.slug}`; }
   });
+  bindLogo(t);
 }
 
 // Édition suivante : reprend les paires, sans la dernière de chaque poule par défaut (règlement)
@@ -199,6 +219,7 @@ function renderTournament() {
   app.innerHTML = `
     <div class="hero">
       <div class="row between"><a href="#/" class="back">← Tous les tournois</a><span class="badge ${t.phase === 'groups' || t.phase === 'knockout' ? 'live' : ''}">${PHASES[t.phase]}</span></div>
+      ${t.logo ? `<img class="tlogo" src="/api/logos/${t.id}?v=${t.logo}" alt="Logo ${esc(t.name)}">` : ''}
       <h1>${esc(t.name)}</h1>
       <div class="muted">${[t.date && new Date(t.date).toLocaleDateString('fr-FR', { dateStyle: 'full' }), t.location, `${teams.length} équipes`].filter(Boolean).map(esc).join(' · ')}</div>
       <div class="row" style="margin-top:10px">
@@ -224,7 +245,7 @@ function renderTournament() {
     cur.tab = b.dataset.tab;
     renderTournament();
     // Les prévisions se calculent à la demande : on les charge à l'ouverture de l'onglet.
-    if (cur.tab === 'chances' && isAdmin()) { await loadForecast(); if (cur.tab === 'chances') renderTournament(); }
+    if (FC_TABS.includes(cur.tab) && isAdmin()) { const tab = cur.tab; await loadForecast(); if (cur.tab === tab) renderTournament(); }
   }));
   bindPanel();
 }
@@ -260,6 +281,28 @@ async function resizePhoto(file) {
 async function uploadPhoto(teamId, n, file) {
   const body = await resizePhoto(file);
   const res = await fetch(`/api/teams/${teamId}/photo/${n}`, { method: 'PUT', headers: { 'Content-Type': 'image/jpeg', Authorization: `Bearer ${token}` }, body });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Envoi impossible');
+}
+
+// Logo du tournoi : rien du tout s'il n'y en a pas.
+const logo = (t, px) => (t.logo ? `<img class="tlogo-s" style="--s:${px}px" src="/api/logos/${t.id}?v=${t.logo}" alt="">` : '');
+// PNG (transparence conservée) de 320 px au plus ; réduit encore si le fichier reste trop lourd.
+async function resizeLogo(file) {
+  let bmp;
+  try { bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }); } catch { bmp = await createImageBitmap(file); }
+  for (const max of [320, 200, 120]) {
+    const k = Math.min(1, max / Math.max(bmp.width, bmp.height));
+    const c = Object.assign(document.createElement('canvas'), { width: Math.round(bmp.width * k), height: Math.round(bmp.height * k) });
+    c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+    const blob = await new Promise((res) => c.toBlob(res, 'image/png'));
+    if (!blob) throw new Error('Logo illisible');
+    if (blob.size <= 380 * 1024) return blob;
+  }
+  throw new Error('Logo trop lourd');
+}
+async function uploadLogo(tid, file) {
+  const body = await resizeLogo(file);
+  const res = await fetch(`/api/tournaments/${tid}/logo`, { method: 'PUT', headers: { 'Content-Type': 'image/png', Authorization: `Bearer ${token}` }, body });
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Envoi impossible');
 }
 
@@ -340,6 +383,15 @@ const fmtDate = (d) => new Date(`${d}T12:00:00`).toLocaleDateString('fr-FR', { w
 const signed = (n) => (n > 0 ? `+${n}` : n);
 
 // Matchs
+// Chance de gagner un match à jouer (organisateurs) : niveaux estimés sur tous les sets déjà joués (lib/forecast.js).
+const FC_TABS = ['chances', 'matches', 'bracket'];
+function winChanceText(m) {
+  if (!isAdmin() || m.winner || !m.team1 || !m.team2) return '';
+  const a = cur.fc?.teams?.find((x) => x.id === m.team1), b = cur.fc?.teams?.find((x) => x.id === m.team2);
+  if (!a || !b) return '';
+  const ps = 1 / (1 + Math.exp(b.rating - a.rating)), p = ps * ps * (3 - 2 * ps); // gagner 2 sets avant l'autre
+  return `Chances ${pct(p)} – ${pct(1 - p)}`;
+}
 function matchCard(m) {
   const { tournament: t } = cur.data;
   const bye = m.stage === 'ko' && m.round === 1 && m.winner && (!m.team1 || !m.team2);
@@ -355,7 +407,7 @@ function matchCard(m) {
   const first = m.moves?.[0];
   const moved = first && !m.winner ? `<strong>Reporté</strong> (prévu ${first.from_date ? fmtDate(first.from_date) : '—'})${m.deadline ? `, à jouer avant le ${fmtDate(m.deadline)}` : ''}` : first ? `Reporté (prévu ${first.from_date ? fmtDate(first.from_date) : '—'})` : '';
   const lateTag = { late: '<strong>⚠ En retard</strong>', forfeit: '<strong>⚠ Forfait à appliquer</strong>' }[m.late];
-  const meta = [label, m.date && fmtDate(m.date), m.time, m.court, moved, lateTag, forfeit && `<strong>${forfeit}</strong>`].filter(Boolean).map((x) => (x.includes('<strong>') ? x : x.startsWith('Reporté') ? x : esc(x))).join(' · ');
+  const meta = [label, m.date && fmtDate(m.date), m.time, m.court, moved, lateTag, forfeit && `<strong>${forfeit}</strong>`, winChanceText(m)].filter(Boolean).map((x) => (x.includes('<strong>') ? x : x.startsWith('Reporté') ? x : esc(x))).join(' · ');
   const tag = editable ? 'button' : 'div';
   return `<${tag} class="match ${m.winner || bye ? '' : 'todo'} ${editable ? 'editable' : ''}" ${editable ? `data-match="${m.id}"` : ''}>
     ${line(m.team1, 0)}${line(m.team2, 1)}<div class="meta">${meta}${editable && !m.winner ? ' · Saisir le score' : ''}</div></${tag}>${liveBar(m)}`;
@@ -1171,7 +1223,7 @@ const keeperKey = (token) => `keeper:${token}`;
 function keeperStop() {
   document.body.classList.remove('keeping');
   if (!keeper) return;
-  clearInterval(keeper.poll); clearTimeout(keeper.timer);
+  clearInterval(keeper.poll); clearTimeout(keeper.timer); clearInterval(keeper.tick);
   document.removeEventListener('visibilitychange', keeper.onVis);
   keeper.wake?.release?.().catch(() => {});
   remoteOff();
@@ -1194,10 +1246,35 @@ async function renderKeeper(token) {
   keeperDraw();
   if (keeper.dirty) keeperSync();
   keeper.poll = setInterval(keeperPoll, 4000);
+  // Minuteur de location : décompté depuis la première ouverture du comptage sur cet appareil
+  try { keeper.tstart = Number(localStorage.getItem(`keeperTimer:${token}`)) || 0; } catch {}
+  if (!keeper.tstart) { keeper.tstart = Date.now(); try { localStorage.setItem(`keeperTimer:${token}`, keeper.tstart); } catch {} }
+  keeper.alerted = timerLeft() <= 0 ? 2 : timerLeft() <= TIMER_WARN ? 1 : 0;   // pas d'alerte pour un seuil déjà dépassé
+  keeper.tick = setInterval(timerTick, 1000);
   const wake = async () => { try { if (keeper && document.visibilityState === 'visible') keeper.wake = await navigator.wakeLock?.request('screen'); } catch {} };
   keeper.onVis = wake;
   document.addEventListener('visibilitychange', wake);
   wake();
+}
+
+// --- Minuteur : la location du terrain dure 90 minutes, décomptées depuis le début du comptage ---
+const TIMER_MIN = 90, TIMER_WARN = 10 * 60000;
+function timerLeft() { return keeper.tstart + TIMER_MIN * 60000 - Date.now(); }
+function timerText(ms) {
+  const s = Math.floor(Math.abs(ms) / 1000), h = Math.floor(s / 3600), m = String(Math.floor(s / 60) % 60).padStart(2, '0'), ss = String(s % 60).padStart(2, '0');
+  return `${ms < 0 ? '+' : ''}${h ? `${h}:` : ''}${h ? m : Math.floor(s / 60)}:${ss}`;
+}
+function timerTick() {
+  if (!keeper) return;
+  const left = timerLeft();
+  const el = $('#ktimer');
+  if (el) { el.textContent = `⏱ ${timerText(left)}`; el.className = `ktimer ${left <= 0 ? 'over' : left <= TIMER_WARN ? 'warn' : ''}`; }
+  const level = left <= 0 ? 2 : left <= TIMER_WARN ? 1 : 0;
+  if (level > keeper.alerted) {
+    keeper.alerted = level;
+    navigator.vibrate?.([300, 150, 300]);
+    toast(level === 2 ? 'Temps de location écoulé' : 'Plus que 10 minutes de location');
+  }
 }
 
 const SYNC_LABEL = { ok: '● Enregistré', busy: '● Envoi…', off: '● Hors ligne : les points sont gardés' };
@@ -1243,7 +1320,7 @@ function keeperDraw() {
       <button class="kicon" id="kmenu" aria-label="Menu">⋯</button>
     </div>
     <div class="kboard">${row(0)}${row(1)}</div>
-    <div class="kstate">${state || '&nbsp;'}</div>
+    <div class="kstate">${r.winner ? '' : '<span id="ktimer" class="ktimer"></span>'}<span>${state || '&nbsp;'}</span></div>
     ${bottom}
     <div class="krotate"><div class="kphone" aria-hidden="true">📱</div><h2>Tournez le téléphone en mode paysage</h2><p>Le score keeper se lit et se touche mieux à l'horizontale.</p><button class="ghost" id="kstay">Rester en portrait</button></div></div>`;
   $('#kstay')?.addEventListener('click', () => { k.stay = true; try { localStorage.setItem('keeperPortrait', '1'); } catch {} keeperDraw(); });
@@ -1253,6 +1330,7 @@ function keeperDraw() {
   $('#kmenu')?.addEventListener('click', keeperMenu);
   $('#kremote')?.addEventListener('click', remoteToggle);
   remoteMeta();
+  timerTick();
   $('#ksubmit')?.addEventListener('click', async () => {
     try { await keeperSync(true); keeperDraw(); } catch (e) { toast(e.message); }
   });
@@ -1289,7 +1367,8 @@ function remoteToggle() {
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
   k.remote = { audio, ctx, url: audio.src };
   const ms = navigator.mediaSession;
-  const undo = () => { remoteBeep([660, 440]); keeperUndo(); audio.play().catch(() => {}); };
+  if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {});
+  const undo = () => { remoteBeep([660, 440]); keeperUndo(); remoteBuzz(); audio.play().catch(() => {}); };
   ms.setActionHandler('nexttrack', () => remotePoint(1));
   ms.setActionHandler('previoustrack', () => remotePoint(2));
   ms.setActionHandler('play', undo);
@@ -1306,11 +1385,22 @@ function remoteOff() {
   const ms = navigator.mediaSession;
   for (const a of ['nexttrack', 'previoustrack', 'play', 'pause']) { try { ms.setActionHandler(a, null); } catch {} }
   ms.metadata = null; ms.playbackState = 'none';
+  navigator.serviceWorker?.ready.then((reg) => reg.getNotifications({ tag: 'score' })).then((l) => l?.forEach((n) => n.close())).catch(() => {});
 }
 function remotePoint(w) {
   const n = keeper?.points.length;
   keeperPoint(w);
-  if (keeper && keeper.points.length > n) remoteBeep(w === 1 ? [880] : [523, 523]);
+  if (keeper && keeper.points.length > n) { remoteBeep(w === 1 ? [880] : [523, 523]); remoteBuzz(w === 1 ? [200] : [200, 120, 200]); }
+}
+// Une notification renouvelée à chaque point : c'est elle qui fait vibrer la montre (la notification média, elle, est silencieuse).
+// Le relais vers la montre dépend de son appli (Huawei Health : vibration un point sur deux environ).
+function remoteBuzz(pattern = [120, 80, 120, 80, 120]) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  const r = KeeperEngine.replay(keeper.points), [a, b] = KeeperEngine.pointLabels(r);
+  navigator.serviceWorker?.ready.then((reg) => reg.showNotification(r.winner ? 'Match terminé' : `${a} - ${b}`, {
+    body: `Sets ${r.sets.map((x) => x.join('-')).join(' ') || '0-0'}${r.winner ? '' : ` · Jeux ${r.games.join('-')}`}`,
+    tag: 'score', renotify: true, vibrate: pattern, icon: '/icon-192.png', silent: false,
+  })).catch(() => {});
 }
 function remoteBeep(freqs) {
   const ctx = keeper?.remote?.ctx;
@@ -1402,6 +1492,7 @@ function keeperMenu() {
     <p class="muted">Pour compter depuis un autre téléphone, donnez-lui ce code (valable jusqu'à la saisie du résultat).</p>
     <input id="kurl" class="kcode" readonly value="${esc(fmtCode(code))}" onfocus="this.select()">
     <div class="row" style="margin-top:8px">${navigator.share ? '<button value="share">Partager</button>' : ''}<button value="copy" class="primary">Copier le code</button></div>
+    <div class="row" style="margin-top:16px"><button value="timer" class="small">Minuteur : repartir de 90 min</button></div>
     <div class="row" style="margin-top:16px"><button value="reset" class="danger small">Recommencer à zéro</button><button value="close" class="danger small">Fermer le score keeper</button></div>
     <div class="row" style="margin-top:16px;justify-content:flex-end"><button value="cancel" class="ghost">Retour</button></div>`,
   async (f, action) => {
@@ -1409,6 +1500,10 @@ function keeperMenu() {
       try { await navigator.share({ title: 'Score keeper', text: codeMessage(code) }); } catch {}
     } else if (action === 'copy') {
       await copyOrShare(codeMessage(code), 'copy', $('#kurl'), 'Code copié');
+    } else if (action === 'timer') {
+      k.tstart = Date.now(); k.alerted = 0;
+      try { localStorage.setItem(`keeperTimer:${k.token}`, k.tstart); } catch {}
+      timerTick(); toast('Minuteur relancé : 90 min');
     } else if (action === 'reset') {
       if (!confirm('Remettre le score à zéro ?')) throw new Error('Annulé');
       k.points = []; k.status = 'live'; keeperChanged();
