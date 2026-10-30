@@ -280,3 +280,10 @@ body.keeping main { max-width: none; padding: 0; }
 
 .kcode { text-align: center; font-size: 1.5rem; font-weight: 800; letter-spacing: .25em; text-transform: uppercase; }
 .codeform { margin-bottom: 12px; }
+
+/* Archives : podium sur la carte d'un tournoi terminé */
+.arch-podium { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.arch-podium > div { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.arch-podium .medal { font-size: 1.1rem; width: 1.5rem; text-align: center; }
+.arch-podium .nm { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.arch-podium .champ .nm { font-weight: 800; }

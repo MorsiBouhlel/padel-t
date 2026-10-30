@@ -124,13 +124,22 @@ async function renderHome() {
         <div class="row between"><strong>${logo(t, 28)}${esc(t.name)}</strong><span class="badge">${PHASES[t.phase]}</span></div>
         <div class="muted">${meta(t)}</div>
       </a>`;
+  // Tournoi terminé : le podium (champion, finaliste, 3e) directement sur la carte.
+  const archive = (t) => {
+    const medals = ['🥇', '🥈', '🥉'];
+    return `<a class="card" href="#/t/${esc(t.slug)}">
+        <div class="row between"><strong>${logo(t, 28)}${esc(t.name)}</strong><span class="badge">${PHASES[t.phase]}</span></div>
+        <div class="muted">${meta(t)}</div>
+        ${t.podium?.length ? `<div class="arch-podium">${t.podium.map((x, i) => `<div class="${i ? '' : 'champ'}"><span class="medal">${medals[i]}</span><span class="avs">${avatar(x, 1, i ? 26 : 34)}${avatar(x, 2, i ? 26 : 34)}</span><span class="nm">${esc(x.name)}</span></div>`).join('')}</div>` : ''}
+      </a>`;
+  };
   const running = list.filter((t) => t.phase === 'groups' || t.phase === 'knockout');
   const others = list.filter((t) => t.phase === 'setup');
   const archived = list.filter((t) => t.phase === 'finished');
   app.innerHTML = `
     ${isAdmin() ? '<div class="row between"><h1>Tournois</h1><button id="new" class="primary">+ Nouveau</button></div>' : ''}
     ${isAdmin() ? '' : codeEntry()}
-    ${list.length ? running.map(live).join('') + others.map(simple).join('') + (archived.length ? `<h2>Archives</h2>${archived.map(simple).join('')}` : '') : '<div class="empty">Aucun tournoi pour le moment.</div>'}`;
+    ${list.length ? running.map(live).join('') + others.map(simple).join('') + (archived.length ? `<h2>Archives</h2>${archived.map(archive).join('')}` : '') : '<div class="empty">Aucun tournoi pour le moment.</div>'}`;
   $('#new')?.addEventListener('click', () => tournamentDialog());
 }
 

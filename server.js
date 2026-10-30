@@ -314,6 +314,19 @@ function fullState(t) {
   };
 }
 
+// Podium d'un tournoi terminé : champion, finaliste et, s'il y a un match pour la 3e place, 3e (avec les photos).
+function podiumOf(st) {
+  const last = st.matches.filter((m) => m.stage === 'ko' && m.round === st.koRounds);
+  const final = last.find((m) => m.pos === 0);
+  const third = last.find((m) => m.pos === 1);
+  const team = (id) => {
+    const x = st.teams.find((t) => t.id === id);
+    return x ? { id: x.id, name: x.name, p1: x.p1, p2: x.p2, photo1: x.photo1, photo2: x.photo2 } : null;
+  };
+  const loser = (m) => (m.winner === m.team1 ? m.team2 : m.team1);
+  return [final && team(final.winner), final && team(loser(final)), third && third.winner && team(third.winner)].filter(Boolean);
+}
+
 // --- Tableau final : propagation des vainqueurs ------------------------------
 const setMatch = db.prepare('UPDATE matches SET team1 = ?, team2 = ?, sets = ?, winner = ?, forfeit = ? WHERE id = ?');
 
@@ -617,8 +630,9 @@ app.get('/api/tournaments', wrap((req, res) => {
   // « Terminé » se déduit de la finale jouée : on ne le calcule que pour les tournois en phase finale
   res.json(rows.map((r) => {
     const id = r.id;
-    const phase = r.phase === 'knockout' ? fullState(q.tournament.get(id)).tournament.phase : r.phase;
-    return { ...r, phase, next: phase === 'groups' || phase === 'knockout' ? nextMatch.get(id, today) || null : null };
+    const st = r.phase === 'knockout' ? fullState(q.tournament.get(id)) : null;
+    const phase = st ? st.tournament.phase : r.phase;
+    return { ...r, phase, next: phase === 'groups' || phase === 'knockout' ? nextMatch.get(id, today) || null : null, podium: phase === 'finished' ? podiumOf(st) : null };
   }));
 }));
 app.get('/api/t/:slug', wrap((req, res) => {
