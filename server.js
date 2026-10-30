@@ -356,6 +356,7 @@ function propagate(m) {
 const app = express();
 app.set('trust proxy', 1); // derrière Caddy : l'IP du visiteur vient de X-Forwarded-For (limite de tentatives de connexion)
 app.use(express.json({ limit: '100kb' }));
+app.get('/logic.js', (req, res) => res.sendFile(path.join(__dirname, 'lib', 'logic.js')));
 app.use(express.static(path.join(__dirname, 'public')));
 
 const wrap = (fn) => (req, res) => {

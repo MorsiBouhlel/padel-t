@@ -250,6 +250,7 @@ function renderTournament() {
   $('#settings')?.addEventListener('click', () => tournamentDialog(t));
   $('#broadcast')?.addEventListener('click', broadcastDialog);
   $('#nextEd')?.addEventListener('click', nextEditionDialog);
+  bindStats();
   app.querySelectorAll('[data-tab]').forEach((b) => (b.onclick = async () => {
     cur.tab = b.dataset.tab;
     renderTournament();
@@ -753,6 +754,83 @@ function livePanel() {
     + ms.map((m) => `<div class="card livecard"><div class="row between"><span class="muted"><i class="livedot"></i> En direct · ${esc([label(m), m.court].filter(Boolean).join(' · '))}</span>${m.live.tb ? '<span class="badge">Tie-break</span>' : ''}</div>${row(m, 0)}${row(m, 1)}</div>`).join('');
 }
 
+// Évolution du classement journée après journée : le classement est recalculé avec les vraies règles (PadelLogic.standings)
+// sur les seuls matchs des journées 1 à J. Les pénalités sont comptées dès la première journée.
+function rankHistory() {
+  const { tournament: t, teams, matches } = cur.data;
+  const out = [];
+  for (let g = 0; g < t.groups_count; g++) {
+    const gt = teams.filter((x) => x.grp === g);
+    const gm = matches.filter((m) => m.stage === 'group' && m.grp === g);
+    const rounds = [...new Set(gm.filter((m) => m.winner).map((m) => m.round))].sort((a, b) => a - b);
+    const ranks = new Map(gt.map((x) => [x.id, []]));
+    for (const r of rounds) PadelLogic.standings(gt, gm.filter((m) => m.round <= r), t.win_pts, t.loss_pts).forEach((row) => ranks.get(row.id).push(row.rank));
+    out.push({ group: g, rounds, ranks });
+  }
+  return out.filter((h) => h.rounds.length >= 2);
+}
+function rankChartPanel() {
+  const hist = rankHistory();
+  if (!hist.length) return '';
+  const t = cur.data.tournament;
+  const lead = hist[0].ranks;
+  if (!lead.has(cur.hlTeam)) cur.hlTeam = [...lead.entries()].sort((a, b) => a[1].at(-1) - b[1].at(-1))[0][0];
+  const W = 340, L = 26, R = 12, T = 14, B = 26, ROW = 22;
+  const chart = (h) => {
+    const n = h.ranks.size, k = h.rounds.length;
+    const x = (i) => L + (i * (W - L - R)) / (k - 1), y = (r) => T + (r - 1) * ROW;
+    const H = T + (n - 1) * ROW + B;
+    const line = (id, hl) => {
+      const rk = h.ranks.get(id), pts = rk.map((r, i) => `${x(i).toFixed(1)},${y(r)}`).join(' ');
+      return hl
+        ? `<polyline points="${pts}" fill="none" stroke="var(--btn)" stroke-width="3.5" stroke-linejoin="round" stroke-linecap="round"/>${rk.map((r, i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(r)}" r="5" fill="var(--btn)"/><text x="${x(i).toFixed(1)}" y="${y(r) - 9}" text-anchor="middle" font-size="10" font-weight="700" fill="var(--ink)">${r}</text>`).join('')}`
+        : `<polyline points="${pts}" fill="none" stroke="var(--line)" stroke-width="1.6" stroke-linejoin="round"/>`;
+    };
+    const ids = [...h.ranks.keys()];
+    return `${t.groups_count > 1 ? `<div class="muted" style="margin-top:6px">Poule ${groupLetter(h.group)}</div>` : ''}
+      <svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Évolution du classement de ${esc(teamName(cur.hlTeam) || '')}">
+        ${Array.from({ length: n }, (_, i) => `<line x1="${L}" x2="${W - R}" y1="${y(i + 1)}" y2="${y(i + 1)}" stroke="var(--line)" stroke-width=".6" stroke-dasharray="2 3"/><text x="${L - 8}" y="${y(i + 1) + 3.5}" text-anchor="end" font-size="10" fill="var(--muted)">${i + 1}</text>`).join('')}
+        ${h.rounds.map((r, i) => `<text x="${x(i).toFixed(1)}" y="${H - 8}" text-anchor="middle" font-size="10" fill="var(--muted)">J${r}</text>`).join('')}
+        ${ids.filter((id) => id !== cur.hlTeam).map((id) => line(id, false)).join('')}
+        ${h.ranks.has(cur.hlTeam) ? line(cur.hlTeam, true) : ''}
+      </svg>`;
+  };
+  const rk = lead.get(cur.hlTeam);
+  const best = Math.min(...rk);
+  const sel = `<select id="hlTeam" aria-label="Paire à suivre">${[...lead.keys()].map((id) => `<option value="${id}" ${id === cur.hlTeam ? 'selected' : ''}>${esc(teamName(id))}</option>`).join('')}</select>`;
+  return `<div class="card"><h3 style="margin:0">Évolution du classement</h3>
+    <div class="muted" style="margin-bottom:8px">Rang après chaque journée (1 = en tête)</div>${sel}
+    <div class="muted" style="margin-top:8px">Actuellement <strong>${rk.at(-1)}${rk.at(-1) === 1 ? 'er' : 'e'}</strong> · meilleur rang : ${best}${best === 1 ? 'er' : 'e'}</div>
+    ${hist.map(chart).join('')}</div>`;
+}
+
+// Face-à-face : on choisit deux paires, on voit leurs confrontations dans ce tournoi et leurs chiffres côte à côte.
+function faceToFacePanel(stats) {
+  const { teams, matches } = cur.data;
+  const a = Number(cur.h2hA) || 0, b = Number(cur.h2hB) || 0;
+  const opts = (v) => `<option value="">— Choisir une paire —</option>${teams.map((x) => `<option value="${x.id}" ${x.id === v ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}`;
+  let body = '<div class="muted" style="margin-top:8px">Choisissez deux paires pour comparer.</div>';
+  if (a && b && a !== b) {
+    const label = (m) => (m.stage === 'group' ? `Journée ${m.round}` : m.pos === 1 && m.round === cur.data.koRounds ? cur.data.thirdName : cur.data.roundNames[m.round]);
+    const score = (m) => (m.winner === -1 ? 'double forfait' : m.forfeit ? 'forfait' : m.sets.map((s) => (m.team1 === a ? s : [s[1], s[0]]).join('-')).join(' '));
+    const duel = matches.filter((m) => (m.team1 === a && m.team2 === b) || (m.team1 === b && m.team2 === a));
+    const wa = duel.filter((m) => m.winner === a).length, wb = duel.filter((m) => m.winner === b).length;
+    const sa = stats.teams.find((x) => x.id === a), sb = stats.teams.find((x) => x.id === b);
+    const avg = (v) => (Math.round(v * 10) / 10).toString().replace('.', ',');
+    const row = (l, f) => `<div class="row between" style="padding:5px 0;border-top:1px solid var(--line)"><strong style="width:28%">${f(sa)}</strong><span class="muted" style="text-align:center">${l}</span><strong style="width:28%;text-align:right">${f(sb)}</strong></div>`;
+    body = `<div class="row between" style="margin-top:10px"><strong style="width:40%">${teamLink(a)}</strong><span class="badge">${wa} – ${wb}</span><strong style="width:40%;text-align:right">${teamLink(b)}</strong></div>
+      ${duel.length ? duel.map((m) => `<div class="row between" style="padding:5px 0;border-top:1px solid var(--line)"><span class="muted">${esc(label(m))}${m.date ? ` · ${fmtDate(m.date)}` : ''}</span><span>${m.winner ? `<strong>${esc(score(m))}</strong>${m.winner > 0 ? ` <span class="muted">· ${esc(teamName(m.winner))}</span>` : ''}` : '<span class="muted">à jouer</span>'}</span></div>`).join('') : '<div class="muted" style="margin-top:6px">Ces deux paires ne se sont pas (encore) rencontrées.</div>'}
+      <div style="margin-top:10px">${row('Matchs joués', (x) => x.played)}${row('Victoires', (x) => x.won)}${row('Sets gagnés', (x) => x.sets)}${row('Jeux marqués / match', (x) => (x.played ? avg(x.gf / x.played) : '–'))}${row('Jeux encaissés / match', (x) => (x.played ? avg(x.ga / x.played) : '–'))}</div>`;
+  }
+  return `<div class="card"><h3 style="margin:0">Face-à-face</h3>
+    <div class="row" style="gap:8px;margin-top:8px"><select id="h2hA" aria-label="Première paire">${opts(a)}</select><select id="h2hB" aria-label="Deuxième paire">${opts(b)}</select></div>${body}</div>`;
+}
+function bindStats() {
+  const redo = () => { renderTournament(); };
+  $('#hlTeam')?.addEventListener('change', (e) => { cur.hlTeam = Number(e.target.value); redo(); });
+  for (const k of ['A', 'B']) $(`#h2h${k}`)?.addEventListener('change', (e) => { cur[`h2h${k}`] = e.target.value; redo(); });
+}
+
 function statsPanel() {
   const d = cur.data;
   if (d.tournament.phase === 'setup') return '<div class="empty">Les statistiques apparaîtront dès les premiers matchs.</div>';
@@ -776,6 +854,8 @@ function statsPanel() {
   const tight = [...records].filter((r) => r.sets === 3).sort((a, b) => a.gap - b.gap)[0];
   return `
     <div class="grid2" style="margin-top:12px">${kpi(`${done}/${all.length}`, 'matchs joués')}${kpi(totalGames, 'jeux disputés')}${kpi(avg(totalGames / (records.length || 1)), 'jeux par match')}${kpi(`${records.length ? Math.round(100 * threeSets / records.length) : 0} %`, 'matchs en 3 sets')}</div>
+    ${rankChartPanel()}
+    ${faceToFacePanel({ teams })}
     ${list('Meilleure attaque', 'Jeux marqués par match', top(played, (t) => t.gf / t.played, (v) => avg(v)))}
     ${list('Meilleure défense', 'Jeux encaissés par match (moins = mieux)', top(played, (t) => -t.ga / t.played, (v) => avg(-v)))}
     ${list('Sets gagnés', '', top(played, (t) => t.sets, (v, t) => `${v} <span class="muted">(${t.setsLost} perdus)</span>`))}
