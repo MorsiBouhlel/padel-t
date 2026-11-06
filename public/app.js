@@ -335,7 +335,33 @@ const navHtml = (active) => {
 };
 
 const teamName = (id) => (cur.data.teams.find((t) => t.id === id) || {}).name;
-const teamLink = (id) => `<a class="tlink" href="#/t/${esc(cur.slug)}/team/${id}">${esc(teamName(id))}</a>`;
+// Nom d'une paire suivi de son rang (à droite), de sa tendance et, si elle est dans les places qualificatives, d'un fond vert.
+// plain = true : nom seul (tableau du classement, qui a déjà sa colonne de rang).
+const teamChip = (id, inner, plain) => {
+  const ri = !plain && rankInfo(id);
+  return ri ? `<span class="rk${ri.qual ? ' qual' : ''}">${inner}<b>${ri.rank}</b>${trendArrow(ri)}</span>` : inner;
+};
+const teamLink = (id, plain) => teamChip(id, `<a class="tlink" href="#/t/${esc(cur.slug)}/team/${id}">${esc(teamName(id))}</a>`, plain);
+const teamTag = (id) => teamChip(id, esc(teamName(id)));
+// Classement actuel de chaque paire + tendance (rang après l'avant-dernière journée jouée de sa poule). Mis en cache par données.
+function rankInfo(id) {
+  const d = cur.data;
+  if (!d) return null;
+  if (!d.__rk || d.__rk.src !== d.matches) {
+    const { tournament: t, teams, matches } = d, map = new Map();
+    if (t.phase !== 'setup') for (let g = 0; g < t.groups_count; g++) {
+      const gt = teams.filter((x) => x.grp === g), gm = matches.filter((m) => m.stage === 'group' && m.grp === g);
+      const rounds = [...new Set(gm.filter((m) => m.winner).map((m) => m.round))].sort((a, b) => a - b);
+      if (!rounds.length) continue;
+      const prev = new Map();
+      if (rounds.length > 1) PadelLogic.standings(gt, gm.filter((m) => m.round <= rounds.at(-2)), t.win_pts, t.loss_pts).forEach((r) => prev.set(r.id, r.rank));
+      PadelLogic.standings(gt, gm, t.win_pts, t.loss_pts).forEach((r) => map.set(r.id, { rank: r.rank, prev: prev.get(r.id), qual: t.phase === 'groups' && r.played > 0 && r.rank <= t.qualifiers }));
+    }
+    d.__rk = { src: d.matches, map };
+  }
+  return d.__rk.map.get(id) || null;
+}
+const trendArrow = (ri) => ri.prev == null || ri.prev === ri.rank ? '' : ri.rank < ri.prev ? `<i class="tr up" title="Monte (${ri.prev}e → ${ri.rank}e)">▲</i>` : `<i class="tr down" title="Descend (${ri.prev}e → ${ri.rank}e)">▼</i>`;
 
 // Équipes
 function teamsPanel() {
@@ -377,14 +403,14 @@ function groupsPanel() {
   const { standings, tournament: t } = cur.data;
   if (!standings.length) return '<div class="empty">Le classement sera affiché après le lancement du championnat.</div>';
   const podium = (rows) => {
-    const col = (r, cls) => `<div class="${cls}">${avatars(r.id, 40)}<div class="nm">${teamLink(r.id)}</div><div class="pts">${r.points} pts</div><div class="step">${r.rank}</div></div>`;
+    const col = (r, cls) => `<div class="${cls}">${avatars(r.id, 40)}<div class="nm">${teamLink(r.id, 1)}</div><div class="pts">${r.points} pts</div><div class="step">${r.rank}</div></div>`;
     return rows.length >= 3 && rows[0].played > 0 ? `<div class="card"><div class="podium">${col(rows[1], 'p2')}${col(rows[0], 'p1')}${col(rows[2], 'p3')}</div></div>` : '';
   };
   return standings.map((g) => `${podium(g.rows)}
     <div class="card">
       ${t.groups_count > 1 ? `<h3>Poule ${groupLetter(g.group)}</h3>` : ''}
       <table><thead><tr><th>#</th><th class="name">Équipe</th><th title="Matchs joués">J</th><th title="Victoires">V</th><th title="Défaites">D</th><th title="Jeux marqués">Pour</th><th title="Différence de jeux">Diff</th><th>Pts</th></tr></thead>
-      <tbody>${g.rows.map((r) => `<tr class="${r.rank <= t.qualifiers ? 'qual' : ''}"><td>${r.rank}</td><td class="name">${avatars(r.id, 24)}${teamLink(r.id)}${r.penalty ? ` <span class="muted" title="Pénalité">(−${r.penalty})</span>` : ''}</td><td>${r.played}</td><td>${r.won}</td><td>${r.lost}</td>
+      <tbody>${g.rows.map((r) => `<tr class="${r.rank <= t.qualifiers ? 'qual' : ''}"><td>${r.rank}${trendArrow(rankInfo(r.id) || {})}</td><td class="name">${avatars(r.id, 24)}${teamLink(r.id, 1)}${r.penalty ? ` <span class="muted" title="Pénalité">(−${r.penalty})</span>` : ''}</td><td>${r.played}</td><td>${r.won}</td><td>${r.lost}</td>
         <td>${r.gamesFor}</td><td>${signed(r.gamesFor - r.gamesAgainst)}</td><td><strong>${r.points}</strong></td></tr>`).join('')}</tbody></table>
     </div>`).join('') + `<p class="muted">La barre verte indique les équipes qualifiées. Départage : points, différence de jeux, jeux marqués, confrontation directe, moins de matchs joués, puis tirage au sort.</p>
     <div class="row" style="margin-top:8px"><button class="primary small" data-share="rank">Partager sur WhatsApp</button><button class="ghost small" data-share="img" style="color:inherit">Image du classement</button><button class="ghost small" data-share="rank-copy" style="color:inherit">Copier le texte</button></div>`;
@@ -407,13 +433,13 @@ function matchCard(m) {
   const bye = m.stage === 'ko' && m.round === 1 && m.winner && (!m.team1 || !m.team2);
   const editable = isAdmin() && m.team1 && m.team2 && (m.stage === 'ko' || t.phase === 'groups');
   const line = (id, i) => {
-    const name = id ? (editable ? esc(teamName(id)) : teamLink(id)) : bye ? 'Exempt' : 'À déterminer';
+    const name = id ? (editable ? teamTag(id) : teamLink(id)) : bye ? 'Exempt' : 'À déterminer';
     // Le score le plus haut de chaque set est en gras, quelle que soit l'équipe qui gagne le match.
     const sc = m.sets ? m.sets.map((s) => (s[i] > s[1 - i] ? `<strong>${s[i]}</strong>` : s[i])).join(' ') : m.forfeit === 'both' ? 'F' : '';
     return `<div class="t ${m.winner && m.winner === id ? 'win' : ''} ${id ? '' : 'tbd'} ${id && id === cur.team ? 'me' : ''}"><span>${name}</span></div><div class="sc">${sc}</div>`;
   };
   const label = m.stage === 'group' ? (t.groups_count > 1 ? `Poule ${groupLetter(m.grp)} · J${m.round}` : `J${m.round}`) : m.pos === 1 && m.round === cur.data.koRounds ? cur.data.thirdName : cur.data.roundNames[m.round];
-  const forfeit = { team1: `Forfait ${esc(teamName(m.team2))}`, team2: `Forfait ${esc(teamName(m.team1))}`, both: 'Double forfait' }[m.forfeit];
+  const forfeit = { team1: `Forfait ${teamTag(m.team2)}`, team2: `Forfait ${teamTag(m.team1)}`, both: 'Double forfait' }[m.forfeit];
   const first = m.moves?.[0];
   const moved = first && !m.winner ? `<strong>Reporté</strong> (prévu ${first.from_date ? fmtDate(first.from_date) : '—'})${m.deadline ? `, à jouer avant le ${fmtDate(m.deadline)}` : ''}` : first ? `Reporté (prévu ${first.from_date ? fmtDate(first.from_date) : '—'})` : '';
   const lateTag = { late: '<strong>⚠ En retard</strong>', forfeit: '<strong>⚠ Forfait à appliquer</strong>' }[m.late];
@@ -639,7 +665,7 @@ function bracketPanel() {
   if (!ko.length) return '<div class="empty">Les play-offs seront disponibles à la fin du championnat.</div>';
   const cols = Array.from({ length: cur.data.koRounds }, (_, i) => i + 1);
   const final = ko.find((m) => m.round === cur.data.koRounds && m.pos === 0);
-  return `${final?.winner ? `<div class="card" style="text-align:center;background:var(--accent);color:var(--accent-ink)">🏆 <strong>${esc(teamName(final.winner))}</strong></div>` : ''}
+  return `${final?.winner ? `<div class="card" style="text-align:center;background:var(--accent);color:var(--accent-ink)">🏆 <strong>${teamTag(final.winner)}</strong></div>` : ''}
     <div class="bracket">${cols.map((r) => `<div class="col"><h3>${esc(cur.data.roundNames[r])}</h3>${ko.filter((m) => m.round === r).sort((a, b) => a.pos - b.pos).map(matchCard).join('')}</div>`).join('')}</div>`;
 }
 
@@ -676,6 +702,7 @@ function renderTeamPage() {
       <div class="card row between"><div><strong>Forme</strong><div class="muted">Sets ${row.setsFor}-${row.setsAgainst} · Jeux ${row.gamesFor}-${row.gamesAgainst}</div></div>
         <div class="row" style="gap:6px">${form.map((f) => `<span class="dot ${f === 'V' ? 'v' : 'd'}" aria-label="${f === 'V' ? 'Victoire' : 'Défaite'}">${f}</span>`).join('')}</div></div>` : ''}
     ${(() => { const f = isAdmin() && cur.fc?.teams?.find((x) => x.id === team.id); if (!f) return ''; const ko = t.phase === 'knockout' || t.phase === 'finished'; return `<h2>Ses chances</h2><div class="stats4" style="grid-template-columns:repeat(3,minmax(0,1fr))">${[...(ko ? [['final', 'Finale']] : [['qualify', 'Qualification']]), ['podium', 'Podium'], ['champion', 'Victoire']].map(([k, l]) => `<div><b>${pct(f[k])}</b><span>${l}</span></div>`).join('')}</div>`; })()}
+    ${objectivePanel(team)}
     ${team.changes?.length ? `<h2>Changements de partenaire</h2>${team.changes.map((c) => `<div class="card muted">J${c.round || '—'} · ${esc([c.old_p1, c.old_p2].filter(Boolean).join(' & '))} → <strong>${esc([c.new_p1, c.new_p2].filter(Boolean).join(' & '))}</strong>${c.penalty ? ` · −${c.penalty} pts` : ' · sans pénalité'}${c.reason ? ` · ${esc(c.reason)}` : ''}</div>`).join('')}` : ''}
     ${isAdmin() && t.phase === 'groups' ? '<div class="row" style="margin-top:12px"><button class="small" id="partner">Changer de partenaire</button></div>' : ''}
     ${section('Phase finale', ko)}
@@ -934,6 +961,32 @@ async function loadForecast() {
   const slug = cur.slug;
   try { const fc = await api(`/api/t/${slug}/forecast`); if (cur && cur.slug === slug) { cur.fc = fc; cur.fcErr = null; } }
   catch (e) { if (cur && cur.slug === slug) cur.fcErr = e.message; }
+  if (cur?.team && cur.slug === slug) { // page d'une paire : son objectif de qualification
+    const team = cur.team;
+    cur.obj = await api(`/api/t/${slug}/objective/${team}`).catch(() => null);
+    if (cur.team !== team) cur.obj = null;
+  } else if (cur) cur.obj = null;
+}
+// « Objectif » d'une paire : ce que chaque match restant change à sa qualification.
+function objectivePanel(team) {
+  const o = isAdmin() && cur.obj;
+  if (!o || o.status === 'na') return '';
+  if (o.status === 'done') return `<h2>🎯 Objectif</h2><div class="card muted">Tous ses matchs de poule sont joués : ${o.qualified ? `qualifiée (${o.rank}${o.rank === 1 ? 'er' : 'e'})` : `non qualifiée (${o.rank}e, ${o.qualifiers} places)`}.</div>`;
+  const nm = (id) => esc(cur.data.teams.find((x) => x.id === id)?.name || '?');
+  const n = (v) => (v == null ? '—' : pct(v));
+  const rows = o.matches.map((m) => {
+    const must = m.ifLose != null && m.ifLose < 0.05 && (m.ifWin ?? 0) > 0.05;
+    const useless = m.ifWin != null && m.ifLose != null && Math.abs(m.ifWin - m.ifLose) < 0.05;
+    return `<div class="card"><div class="row between"><strong>J${m.round} · ${nm(m.opponent)}</strong>${must ? '<span class="badge live">À gagner</span>' : useless ? '<span class="badge">Peu décisif</span>' : ''}</div>
+      <div class="muted">Victoire : <strong>${n(m.ifWin)}</strong> de qualification · Défaite : <strong>${n(m.ifLose)}</strong> · Chance de gagner ${pct(m.pWin)}</div></div>`;
+  }).join('');
+  const total = o.matches.length;
+  const wins = o.byWins.filter((w) => w.qualify != null).map((w) => `<div><b>${n(w.qualify)}</b><span>${w.wins}/${total} victoire${w.wins > 1 ? 's' : ''}</span></div>`).join('');
+  return `<h2>🎯 Objectif : top ${o.qualifiers}</h2>
+    <div class="card"><strong>${pct(o.qualify)}</strong> de chances de se qualifier aujourd'hui <span class="muted">(actuellement ${o.rank}${o.rank === 1 ? 'er' : 'e'})</span></div>
+    ${rows}
+    <div class="stats4" style="grid-template-columns:repeat(${Math.min(4, o.byWins.filter((w) => w.qualify != null).length || 1)},minmax(0,1fr))">${wins}</div>
+    <p class="muted" style="margin:4px 4px 0">Estimation par simulation des matchs restants de la poule, selon le niveau montré jusqu'ici.</p>`;
 }
 const pct = (v) => (v <= 0 ? '0%' : v >= 1 ? '100%' : v < 0.005 ? '<1%' : v > 0.995 ? '>99%' : `${Math.round(v * 100)}%`);
 function chancesPanel() {
@@ -1107,7 +1160,7 @@ async function postponeDialog(m) {
   try { history = await api(`/api/matches/${m.id}/postponements`); } catch {}
   const max = m.deadline ? new Date(new Date(`${m.deadline}T12:00:00Z`).getTime() - 864e5).toISOString().slice(0, 10) : '';
   openDialog(`<h3>Reporter le match</h3>
-    <p><strong>${esc(teamName(m.team1))}</strong> – <strong>${esc(teamName(m.team2))}</strong><br>
+    <p><strong>${teamTag(m.team1)}</strong> – <strong>${teamTag(m.team2)}</strong><br>
     <span class="muted">Actuellement : ${m.date ? esc(fmtDate(m.date)) : 'sans date'}${m.time ? ` à ${esc(m.time)}` : ''}</span></p>
     <p class="muted">Les deux paires doivent être d'accord, avoir réservé le terrain et communiquer la date dans le groupe WhatsApp. ${m.deadline
       ? `Le match doit être joué <strong>au plus tard le ${esc(fmtDate(max))}</strong> (la journée suivante commence le ${esc(fmtDate(m.deadline))}) ; sinon : défaite 6-0 / 6-0 pour les deux paires.`
@@ -1279,7 +1332,7 @@ function scoreDialog(m) {
     <input name="b${i}" type="number" inputmode="numeric" min="0" max="99" value="${sets[i]?.[1] ?? ''}" aria-label="Set ${i + 1} ${esc(teamName(m.team2))}">`;
   openDialog(`
     <h3>Score du match</h3>
-    <div class="sets"><span></span><strong>${esc(teamName(m.team1))}</strong><strong>${esc(teamName(m.team2))}</strong>${[0, 1, 2].map(row).join('')}</div>
+    <div class="sets"><span></span><strong>${teamTag(m.team1)}</strong><strong>${teamTag(m.team2)}</strong>${[0, 1, 2].map(row).join('')}</div>
     <div class="grid2"><div><label>Date</label><input type="date" name="date" value="${esc(m.date)}"></div>
     <div><label>Horaire</label><input name="time" maxlength="30" value="${esc(m.time)}" placeholder="20:00"></div></div>
     <label>Terrain</label><input name="court" maxlength="30" value="${esc(m.court)}" placeholder="Terrain 1">

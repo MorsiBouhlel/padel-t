@@ -287,3 +287,10 @@ body.keeping main { max-width: none; padding: 0; }
 .arch-podium .medal { font-size: 1.1rem; width: 1.5rem; text-align: center; }
 .arch-podium .nm { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .arch-podium .champ .nm { font-weight: 800; }
+
+/* Rang + tendance devant le nom d'une paire */
+.rk { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; vertical-align: middle; }
+.rk > b { font-weight: 800; font-size: .8em; opacity: .75; margin-left: 2px; }
+.rk.qual { background: var(--tint); border-radius: 8px; padding: 1px 6px; }
+.tr { font-style: normal; font-size: .7em; line-height: 1; }
+.tr.up { color: #1a9a4a; } .tr.down { color: #d33a3a; }
