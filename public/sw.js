@@ -1,5 +1,5 @@
 // Service worker minimal : l'API n'est jamais mise en cache (données privées, toujours fraîches).
-const CACHE = 'padel-shell-v12';
+const CACHE = 'padel-shell-v15';
 const SHELL = ['/', '/app.js', '/keeper-engine.js', '/logic.js', '/style.css', '/manifest.webmanifest', '/icon-192.png'];
 
 self.addEventListener('install', (e) => {

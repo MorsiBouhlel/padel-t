@@ -98,3 +98,24 @@ test('têtes de série : 1er puis 2e de chaque poule', () => {
   ];
   assert.deepStrictEqual(L.knockoutSeeds(groups, new Map([[1, 0], [2, 0], [3, 1], [4, 1]]), 2), [1, 3, 2, 4]);
 });
+
+test('objectif : gagner ses matchs augmente la qualification, les chiffres sont cohérents', () => {
+  const { objective } = require('../lib/forecast');
+  const f = league(8, (a, b) => (a < 3 && b > 4 ? null : [[6, 3], [6, 3]]));
+  // 8 paires : on ne garde que quelques matchs à jouer pour la paire 7
+  const todoFor7 = f.matches.filter((m) => m.team1 === 7 || m.team2 === 7);
+  todoFor7.slice(0, 3).forEach((m) => { m.sets = null; m.winner = null; });
+  const o = objective({ ...f, teamId: 7, sims: 3000 });
+  assert.strictEqual(o.status, 'ok');
+  assert.strictEqual(o.matches.length, 3);
+  for (const m of o.matches) assert.ok(m.ifWin >= m.ifLose, 'gagner ne peut pas nuire');
+  const q = o.byWins.filter((w) => w.qualify != null);
+  assert.ok(q[q.length - 1].qualify >= q[0].qualify);
+  assert.ok(Math.abs(o.byWins.reduce((n, w) => n + w.share, 0) - 1) < 1e-9);
+});
+
+test('objectif : poule terminée', () => {
+  const { objective } = require('../lib/forecast');
+  const f = league(5, () => [[6, 2], [6, 2]]);
+  assert.strictEqual(objective({ ...f, teamId: 1 }).status, 'done');
+});

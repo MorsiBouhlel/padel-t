@@ -7,7 +7,7 @@ const L = require('./lib/logic');
 const { buildIcs } = require('./lib/ics');
 const webpush = require('web-push');
 const N = require('./lib/notify');
-const { forecast } = require('./lib/forecast');
+const { forecast, objective } = require('./lib/forecast');
 const K = require('./public/keeper-engine');
 
 const PORT = process.env.PORT || 3000;
@@ -480,7 +480,7 @@ function notify(tid, teamIds, body, tag) {
   try {
     const t = q.tournament.get(tid);
     if (!t) return 0;
-    const payload = JSON.stringify({ title: t.name, body, url: `/#/t/${t.slug}`, tag: tag || `t${t.id}` });
+    const payload = JSON.stringify({ title: t.name, body, url: `/#/t/${t.slug}`, tag: tag || `n${Date.now()}-${Math.random().toString(36).slice(2, 6)}` });
     const subs = db.prepare('SELECT * FROM push_subs WHERE tournament_id = ?').all(tid)
       .filter((s) => s.team_id === null || !teamIds || teamIds.includes(s.team_id));
     for (const s of subs) pushTo(s, payload);
@@ -655,6 +655,23 @@ app.get('/api/t/:slug/forecast', admin, wrap((req, res) => {
   const data = forecast({ tournament: t, teams, matches });
   forecastCache.set(t.id, { sig, data });
   if (forecastCache.size > 50) forecastCache.delete(forecastCache.keys().next().value);
+  res.json(data);
+}));
+
+// Objectif d'une paire : sa chance de qualification selon l'issue de ses matchs restants (organisateurs).
+const objectiveCache = new Map();
+app.get('/api/t/:slug/objective/:team', admin, wrap((req, res) => {
+  const t = q.bySlug.get(req.params.slug);
+  if (!t) throw fail(404, 'Tournoi introuvable');
+  const teamId = Number(req.params.team);
+  const teams = q.teams.all(t.id), matches = getMatches(t.id);
+  const sig = crypto.createHash('md5').update(JSON.stringify([t.phase, t.qualifiers, t.groups_count, t.win_pts, t.loss_pts,
+    teams.map((x) => [x.id, x.grp, x.penalty]), matches.map((m) => [m.id, m.team1, m.team2, m.winner, m.sets, m.forfeit])])).digest('hex');
+  const key = `${t.id}:${teamId}`, hit = objectiveCache.get(key);
+  if (hit && hit.sig === sig) return res.json(hit.data);
+  const data = objective({ tournament: t, teams, matches, teamId });
+  objectiveCache.set(key, { sig, data });
+  if (objectiveCache.size > 200) objectiveCache.delete(objectiveCache.keys().next().value);
   res.json(data);
 }));
 
